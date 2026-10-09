@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://v5nl0ey57yey"
+path="res://.godot/imported/9 PM (Normal).mp3-54917a9943bc11425a18055e18eabc9a.mp3str"
+
+[deps]
+
+source_file="res://audio/music/9 PM (Normal).mp3"
+dest_files=["res://.godot/imported/9 PM (Normal).mp3-54917a9943bc11425a18055e18eabc9a.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

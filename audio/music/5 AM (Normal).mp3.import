@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://cywyohylt3wxp"
+path="res://.godot/imported/5 AM (Normal).mp3-fdba853c3ccf734516795fa2783c59c2.mp3str"
+
+[deps]
+
+source_file="res://audio/music/5 AM (Normal).mp3"
+dest_files=["res://.godot/imported/5 AM (Normal).mp3-fdba853c3ccf734516795fa2783c59c2.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

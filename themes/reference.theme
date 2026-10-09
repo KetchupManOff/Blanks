@@ -1,0 +1,113 @@
+# Showcase (All Properties) - an annotated example of the entire theme
+# format. Every selector and every property appears once, with a short
+# note on what it does. Copy this file, strip what you do not need, save
+# it as user://themes/my_theme.theme, then use Settings > Display >
+# Reload Themes and cycle the Theme row. Full rules: README.md.
+#
+# Format reminders:
+# - A `#` comment must start its line (so hex colors never get cut), and
+#   a `//` comment cuts the rest of its line - that is how the short
+#   notes below work.
+# - A selector line opens its block, each property sits on its own line,
+#   and the block closes on its own line. The trailing semicolon after a
+#   value is optional.
+# - Colors are #rgb, #rgba, #rrggbb, or #rrggbbaa hex. Numbers are plain
+#   integers or decimals.
+# - Keep braces out of comments and avoid semicolons inside comment text:
+#   the parser splits lines on them before it reads any comment.
+# - Asset paths are double-quoted, relative to this file, inside the
+#   theme's own folder (subfolders fine). They cannot contain braces,
+#   semicolons, quotes, double slashes, or colons. Media paths below
+#   stay commented out because no asset files ship with the game:
+#   uncomment one, put the real file beside your theme, and it loads
+#   after Reload Themes. A missing file only warns in the status line
+#   and falls back to the color equivalent.
+
+# ---------------------------------------------------------------- theme --
+# Identity and the menu/settings look: base color, text colors, optional
+# background media, and fonts. Only `name` is required.
+theme {
+  name: "Showcase (All Properties)";         // required, quoted, shown in Settings
+  background: #101426;                       // base color behind menu/settings
+  // image: "assets/menu_bg.png";            // menu picture (.png .jpg .jpeg .webp)
+  // video: "assets/menu_bg.ogv";             // menu video (.ogv) - wins over image
+  fit: cover;                                // media scaling - cover crops, contain letterboxes
+  opacity: 0.9;                              // media strength over the color, 0.0-1.0
+  tint: #05080fc0;                           // media wash - its alpha sets the strength
+  text: #f2ecff;                             // primary text
+  dim: #f2ecff9c;                            // muted text - alpha softens it
+  accent: #ffb84d;                           // emphasis: events, headers, selection
+  // font: "assets/body.ttf";                // body font (.ttf .otf) for all UI labels
+  // title_font: "assets/title.ttf";         // headings - falls back to font
+}
+
+# ----------------------------------------------------------------- game --
+# The backdrop behind active play (solo and co-op), visible around the
+# playfield and behind pause overlays. The playfield itself is board.bg.
+game {
+  background: #0a0e1e;                       // backdrop color around the field
+  // image: "assets/game_bg.png";            // backdrop picture
+  // video: "assets/game_bg.ogv";            // backdrop video
+  fit: contain;                              // letterbox instead of cropping
+  opacity: 0.85;                             // fade media over the color
+  tint: #0a0520b0;                           // wash over the media
+}
+
+# ----------------------------------------------------------------- menu --
+# Menu and settings chrome: panels, focus color, typography sizes, and
+# the split-menu layout.
+menu {
+  panel: #171c3aee;                          // menu card and panel background
+  scrim: #050810c8;                          // full-screen dim behind menus
+  focus: #ffd166;                            // selected row and item highlight
+  title_size: 44;                            // heading font size (px), 20-96
+  item_size: 26;                             // menu item font size (px), 14-48
+  spacing: 12;                               // vertical gap between items, 0-48
+  transition: 0.15;                          // restrained transition amount, 0.0-1.0
+  split_gap: 52;                             // gap between split menu columns, 0-160
+  split_padding: 36;                         // inner padding of split panels, 12-96
+  detail_size: 16;                           // detail text font size (px), 12-32
+  divider: #ffb84d59;                        // split panel border color
+}
+
+# ---------------------------------------------------------------- board --
+# The playfield itself (solo and co-op).
+board {
+  bg: #0e1428;                               // playfield background
+  peek: #0e14286e;                           // hidden spawn rows backdrop
+  grid: #fff2;                               // grid lines - short #rgba form
+  border: #ffb84d;                           // playfield frame
+  ghost: #ffffff2b;                          // ghost piece fill (ghosts stay color-only)
+  ghost_line: #ffffff66;                     // ghost piece outline
+  flash: #ffffffd0;                          // line-clear flash
+  section_line: #ffb84d59;                   // co-op section dividers
+  section_tint_alpha: 0.08;                  // co-op ownership tint, 0.0-0.25
+}
+
+# -------------------------------------------------------------- players --
+# Co-op player accent colors, one per player slot.
+players {
+  p1: #39e6ff;                               // player 1 accent
+  p2: #b6ff4a;                               // player 2 accent
+  p3: #ff5d8f;                               // player 3 accent
+  p4: #ffb84d;                               // player 4 accent
+}
+
+# -------------------------------------------------------------- pieces --
+# The tetromino palette. Each letter takes a hex color OR a quoted skin
+# image - a skin keeps the piece color as its fallback, and colors must
+# stay readable over board.bg (unreadable ones fall back per piece).
+pieces {
+  i: #39e6ff;                                // or a skin image: i: "assets/skins/i.png"
+  o: #ffd166;
+  t: #c084fc;
+  s: #b6ff4a;
+  z: #ff5d5d;
+  j: #5d8fff;
+  l: #ff9e4d;
+  dither: hatch;                              // none | bayer | hatch | scanline | stipple
+  dither_strength: 0.55;                     // pattern coverage and ink depth, 0.0 invisible to 1.0 full
+  bloom: true;                               // playfield glow - true is the 0.8 default intensity
+  // bloom: false;                           // false or omitted disables the glow entirely
+  // bloom: 1.25;                            // or an explicit number between 0.0 and 2.0
+}

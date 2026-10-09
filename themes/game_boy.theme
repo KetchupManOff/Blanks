@@ -1,0 +1,60 @@
+# Game Boy - monochrome green LCD with bayer-dithered pieces.
+# A restrained homage: the classic four-shade green palette, every piece
+# drawn in the darkest ink and shaded with the bayer dither pattern.
+# No external assets needed: the bayer pattern is procedural.
+theme {
+  name: "Game Boy";
+  background: #9bbc0f;
+  text: #0f380f;
+  dim: #0f380fae;
+  accent: #306230;
+}
+
+game {
+  background: #9bbc0f;
+}
+
+menu {
+  panel: #8bac0ff0;
+  scrim: #9bbc0fe0;
+  focus: #0f380f;
+  title_size: 48;
+  item_size: 28;
+  spacing: 12;
+  transition: 0.12;
+  split_gap: 44;
+  split_padding: 40;
+  detail_size: 17;
+  divider: #3062302e;
+}
+
+board {
+  bg: #8bac0f;
+  peek: #8bac0f59;
+  grid: #0f380f14;
+  border: #0f380f66;
+  ghost: #0f380f2b;
+  ghost_line: #0f380f66;
+  flash: #c6de8cd9;
+  section_line: #0f380f40;
+  section_tint_alpha: 0.03;
+}
+
+players {
+  p1: #0f380f;
+  p2: #306230;
+  p3: #0f380f;
+  p4: #306230;
+}
+
+pieces {
+  i: #0f380f;
+  o: #0f380f;
+  t: #0f380f;
+  s: #0f380f;
+  z: #0f380f;
+  j: #0f380f;
+  l: #0f380f;
+  dither: bayer;
+  dither_strength: 0.45;
+}

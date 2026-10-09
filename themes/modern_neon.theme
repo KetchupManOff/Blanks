@@ -1,0 +1,55 @@
+# Modern Neon Arcade - the default look. Also the fallback theme.
+theme {
+  name: "Modern Neon Arcade";
+  background: #05080f;
+  text: #ebf2ff;
+  dim: #ebf2ff8c;
+  accent: #21e6ff;
+}
+
+game {
+  background: #05080f;
+}
+
+menu {
+  panel: #0e1233f0;
+  scrim: #05080fdb;
+  focus: #b6ff4a;
+  title_size: 56;
+  item_size: 30;
+  spacing: 14;
+  transition: 0.15;
+  split_gap: 48;
+  split_padding: 44;
+  detail_size: 18;
+  divider: #ffffff2e;
+}
+
+board {
+  bg: #0f1318;
+  peek: #0f131859;
+  grid: #ffffff0b;
+  border: #ffffff59;
+  ghost: #ffffff1a;
+  ghost_line: #ffffff59;
+  flash: #ffffffd9;
+  section_line: #ffffff40;
+  section_tint_alpha: 0.03;
+}
+
+players {
+  p1: #21e6ff;
+  p2: #f2b805;
+  p3: #1ada61;
+  p4: #b838df;
+}
+
+pieces {
+  i: #21e6ff;
+  o: #f2b805;
+  t: #b838df;
+  s: #1ada61;
+  z: #f0394d;
+  j: #386bf5;
+  l: #fa8417;
+}

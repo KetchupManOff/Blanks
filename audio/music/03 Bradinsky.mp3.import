@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://c80a5m4jwduab"
+path="res://.godot/imported/03 Bradinsky.mp3-941e102f56c766c0a2c88fac8c1fc25f.mp3str"
+
+[deps]
+
+source_file="res://audio/music/03 Bradinsky.mp3"
+dest_files=["res://.godot/imported/03 Bradinsky.mp3-941e102f56c766c0a2c88fac8c1fc25f.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

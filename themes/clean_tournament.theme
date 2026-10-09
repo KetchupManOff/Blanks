@@ -1,0 +1,55 @@
+# Clean Tournament - high-contrast, minimal, broadcast-friendly.
+theme {
+  name: "Clean Tournament";
+  background: #f4f4f6;
+  text: #16181d;
+  dim: #16181d8c;
+  accent: #0a6cff;
+}
+
+game {
+  background: #f4f4f6;
+}
+
+menu {
+  panel: #ffffffe6;
+  scrim: #f4f4f6db;
+  focus: #16181d;
+  title_size: 52;
+  item_size: 30;
+  spacing: 14;
+  transition: 0.12;
+  split_gap: 48;
+  split_padding: 44;
+  detail_size: 18;
+  divider: #16181d2e;
+}
+
+board {
+  bg: #ffffff;
+  peek: #ffffff59;
+  grid: #16181d0f;
+  border: #16181d66;
+  ghost: #16181d1f;
+  ghost_line: #16181d66;
+  flash: #16181dd9;
+  section_line: #16181d40;
+  section_tint_alpha: 0.02;
+}
+
+players {
+  p1: #0a6cff;
+  p2: #d98a00;
+  p3: #00843d;
+  p4: #8a2be2;
+}
+
+pieces {
+  i: #0aa2ff;
+  o: #f5a300;
+  t: #8a2be2;
+  s: #00a355;
+  z: #e32127;
+  j: #2743d6;
+  l: #f56200;
+}

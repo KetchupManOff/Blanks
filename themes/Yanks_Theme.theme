@@ -1,0 +1,58 @@
+# Clean Tournament - high-contrast, minimal, broadcast-friendly.
+theme {
+  name: "Yank's Theme";
+  background: #f4f4f6;
+  text: #16181d;
+  dim: #16181d8c;
+  accent: #5c89cc;
+}
+
+game {
+  background: #c0c0c0;
+}
+
+menu {
+  panel: #ffffffe6;
+  scrim: #f4f4f6db;
+  focus: #16181d;
+  title_size: 52;
+  item_size: 30;
+  spacing: 14;
+  transition: 0.12;
+  split_gap: 48;
+  split_padding: 44;
+  detail_size: 18;
+  divider: #16181d2e;
+}
+
+board {
+  bg: #e9e9e9;
+  peek: #b7daafc9;
+  grid: #0f11141e;
+  border: #d98a00;
+  ghost: #16181d1f;
+  ghost_line: #1d1b1666;
+  flash: #16181dd9;
+  section_line: #16181d40;
+  section_tint_alpha: 0.02;
+}
+
+players {
+  p1: #00d3d8;
+  p2: #d98a00;
+  p3: #00843d;
+  p4: #8a2be2;
+}
+
+pieces {
+  i: #0aa2ff;
+  o: #00397a;
+  t: #d89c00;
+  s: #008464;
+  z: #ff626a;
+  j: #967fe5;
+  l: #e4033d;
+  dither: stipple;
+  dither_strength: 0.45;
+  bloom: true;
+}

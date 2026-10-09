@@ -1,0 +1,55 @@
+# Retro CRT - phosphor green on a dark tube.
+theme {
+  name: "Retro CRT";
+  background: #020502;
+  text: #b8ffc9;
+  dim: #b8ffc98c;
+  accent: #33ff77;
+}
+
+game {
+  background: #020502;
+}
+
+menu {
+  panel: #06180af0;
+  scrim: #020502db;
+  focus: #eaffea;
+  title_size: 52;
+  item_size: 28;
+  spacing: 12;
+  transition: 0.1;
+  split_gap: 44;
+  split_padding: 40;
+  detail_size: 18;
+  divider: #33ff772e;
+}
+
+board {
+  bg: #04120a;
+  peek: #04120a59;
+  grid: #33ff770f;
+  border: #33ff7766;
+  ghost: #33ff771f;
+  ghost_line: #33ff7766;
+  flash: #d8ffdcd9;
+  section_line: #33ff7740;
+  section_tint_alpha: 0.03;
+}
+
+players {
+  p1: #33ff77;
+  p2: #ffe066;
+  p3: #66d9ff;
+  p4: #ff9dd1;
+}
+
+pieces {
+  i: #66d9ff;
+  o: #ffe066;
+  t: #ff9dd1;
+  s: #33ff77;
+  z: #ff6b6b;
+  j: #a78bfa;
+  l: #ffb366;
+}

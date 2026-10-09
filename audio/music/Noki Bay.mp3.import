@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://bawp5w7anyeed"
+path="res://.godot/imported/Noki Bay.mp3-03f36270ee12565de2541656eb2f8116.mp3str"
+
+[deps]
+
+source_file="res://audio/music/Noki Bay.mp3"
+dest_files=["res://.godot/imported/Noki Bay.mp3-03f36270ee12565de2541656eb2f8116.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

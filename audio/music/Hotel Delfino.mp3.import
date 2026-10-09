@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://chi6khlfgytpr"
+path="res://.godot/imported/Hotel Delfino.mp3-b2e0c2198f0aeb9c48866b746fbbcda4.mp3str"
+
+[deps]
+
+source_file="res://audio/music/Hotel Delfino.mp3"
+dest_files=["res://.godot/imported/Hotel Delfino.mp3-b2e0c2198f0aeb9c48866b746fbbcda4.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4
