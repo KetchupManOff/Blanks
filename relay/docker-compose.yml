@@ -1,0 +1,39 @@
+# tye-relay deployment example.
+#
+# Plain (no TLS - suitable only behind an existing TLS terminator):
+#   docker compose up -d --build
+#
+# With Caddy TLS termination (requires DNS + ports for the domain):
+#   docker compose --profile tls up -d --build
+#   edit Caddyfile.example first (set your relay domain), or mount it.
+
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    # The relay never needs host port exposure when a TLS sidecar fronts
+    # it; keep this mapping only for direct LAN/debug use.
+    ports:
+      - "8080:8080"
+    env_file: .env
+    # Uncomment to keep the relay container off the public interface:
+    # expose:
+    #   - "8080"
+
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - relay
+
+volumes:
+  caddy_data:
+  caddy_config:

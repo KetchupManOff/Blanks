@@ -1,18 +1,19 @@
 extends CanvasLayer
-## Code-built online lobby screens (entry / browse / address join / lobby).
+## Code-built online room screens (entry / join-by-code / lobby).
 ## Pure UI: every mutation flows through GameHost cmd_* commands, which
 ## delegate to the OnlineService autoload; this layer only reads service
-## state and service signals for display. Controller navigation matches the
-## other menu screens (ui_navigation classification), and the address-join
-## row uses a real LineEdit because EOS lobby ids are longer than the
-## on-screen keyboard allows.
+## state and service signals for display. Controller navigation matches
+## the other menu screens (ui_navigation classification); the room-code
+## row uses a real LineEdit because typed input beats an on-screen
+## keyboard for short codes. The service's state_changed signal drives
+## screen transitions when create/join completes.
 
 const ThemeProfile = preload("res://scripts/ui/theme_profile.gd")
 const UiNavigation = preload("res://scripts/ui/ui_navigation.gd")
 
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 
-enum ScreenMode { CLOSED, ENTRY, ADDRESS, BROWSE, LOBBY }
+enum ScreenMode { CLOSED, ENTRY, CODE, LOBBY }
 
 const MAX_ROSTER_ROWS: int = 4
 
@@ -28,12 +29,13 @@ var _detail: Label = null
 var _items_box: VBoxContainer = null
 var _roster_box: VBoxContainer = null
 var _roster_labels: Array[Label] = []
-var _address_edit: LineEdit = null
+var _code_edit: LineEdit = null
 
 var _mode: int = ScreenMode.CLOSED
 var _items: Array = []  # {"label": String, "callback": Callable}
 var _labels: Array[Label] = []
 var _selected: int = 0
+var _last_service_state: int = -1
 var _nav: UiNavigation = UiNavigation.new()
 var _tokens: Dictionary = ThemeProfile.default_tokens()
 var _font: Font = null
@@ -53,7 +55,7 @@ func setup(host: Node) -> void:
 	if _service != null:
 		_service.status_changed.connect(_on_status_changed)
 		_service.lobby_changed.connect(_on_lobby_changed)
-		_service.browse_done.connect(_on_browse_done)
+		_service.state_changed.connect(_on_state_changed)
 
 
 func _build() -> void:
@@ -119,13 +121,14 @@ func _build() -> void:
 	_items_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box.add_child(_items_box)
 
-	_address_edit = LineEdit.new()
-	_address_edit.placeholder_text = "lobby id or address:port"
-	_address_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_address_edit.custom_minimum_size = Vector2(420.0, 0.0)
-	_address_edit.visible = false
-	_address_edit.text_submitted.connect(_on_address_submitted)
-	box.add_child(_address_edit)
+	_code_edit = LineEdit.new()
+	_code_edit.placeholder_text = "ROOM CODE"
+	_code_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_code_edit.max_length = 16
+	_code_edit.custom_minimum_size = Vector2(420.0, 0.0)
+	_code_edit.visible = false
+	_code_edit.text_submitted.connect(_on_code_submitted)
+	box.add_child(_code_edit)
 
 	_style_panel()
 
@@ -166,9 +169,9 @@ func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 func open_entry() -> void:
 	_mode = ScreenMode.ENTRY
 	_title.text = "ONLINE CO-OP"
-	_detail.text = "EOS P2P - host-authoritative\nSign-in uses the Dev Auth Tool in debug builds and an anonymous Device ID in release builds (identity is device-local, not a recoverable account)"
-	_address_edit.visible = false
-	_address_edit.text = ""
+	_detail.text = "Relay-backed online co-op\nCreate a room and share its code, or join with a code"
+	_code_edit.visible = false
+	_code_edit.text = ""
 	_set_items(_entry_items())
 	visible = true
 	refresh_status()
@@ -177,31 +180,22 @@ func open_entry() -> void:
 func open_lobby() -> void:
 	_mode = ScreenMode.LOBBY
 	_title.text = "ONLINE LOBBY"
-	_address_edit.visible = false
-	_address_edit.text = ""
+	_code_edit.visible = false
+	_code_edit.text = ""
 	_set_items(_lobby_items())
 	visible = true
 	refresh_status()
 	_refresh_roster()
 
 
-func open_browse() -> void:
-	_mode = ScreenMode.BROWSE
-	_title.text = "BROWSE LOBBIES"
-	_address_edit.visible = false
-	_set_items(_browse_items())
-	visible = true
-	refresh_status()
-
-
-func open_address() -> void:
-	_mode = ScreenMode.ADDRESS
-	_title.text = "JOIN BY ID"
-	_detail.text = "Type the lobby id (or address:port in dev mode) and press Enter"
-	_address_edit.visible = true
-	_address_edit.text = ""
+func open_code() -> void:
+	_mode = ScreenMode.CODE
+	_title.text = "JOIN ROOM"
+	_detail.text = "Type the room code and press Enter (Esc to cancel)"
+	_code_edit.visible = true
+	_code_edit.text = ""
 	_set_items([])
-	_address_edit.grab_focus()
+	_code_edit.grab_focus()
 	visible = true
 	refresh_status()
 
@@ -230,28 +224,9 @@ func refresh_status() -> void:
 
 func _entry_items() -> Array:
 	var items: Array = []
-	items.append(_item("CREATE LOBBY", Callable(_host, "cmd_online_create")))
-	if _service != null and _service.bridge != null:
-		items.append(_item("BROWSE LOBBIES", Callable(_host, "cmd_online_browse")))
-	items.append(_item("JOIN BY ID", Callable(_host, "cmd_online_join_address_open")))
+	items.append(_item("CREATE ROOM", Callable(_host, "cmd_online_create")))
+	items.append(_item("JOIN ROOM", Callable(_host, "cmd_online_join_code_open")))
 	items.append(_item("BACK", Callable(_host, "cmd_online_back")))
-	return items
-
-
-func _browse_items() -> Array:
-	var items: Array = []
-	if _service != null:
-		var results: Array = _service.browse_results
-		for i in results.size():
-			var entry: Dictionary = results[i]
-			var label := "%s  %d/%d" % [
-				String(entry.get("tye_name", "LOBBY")),
-				int(entry.get("members", 0)),
-				int(entry.get("max_members", 4)),
-			]
-			items.append(_item("JOIN  %s" % label, Callable(_host, "cmd_online_join_index").bind(i)))
-	items.append(_item("REFRESH", Callable(_host, "cmd_online_browse")))
-	items.append(_item("BACK", Callable(_host, "cmd_online_browse_back")))
 	return items
 
 
@@ -270,9 +245,6 @@ func _lobby_items() -> Array:
 	items.append(_item("LEAVE", Callable(_host, "cmd_online_leave")))
 	if is_host:
 		items.append(_item("START ROUND", Callable(_host, "cmd_online_start_round")))
-	# Debug builds get the native replication proof over the live transport.
-	if OS.is_debug_build() or OS.has_feature("editor"):
-		items.append(_item("P2P PROOF (DEBUG)", Callable(_host, "cmd_online_open_proof")))
 	return items
 
 
@@ -333,6 +305,17 @@ func _refresh_roster() -> void:
 		var ready_tag := "READY" if bool(entry.get("ready", false)) else "..."
 		_roster_labels[i].text = "P%d  %s  [%s]" % [int(entry.get("slot", i)) + 1, String(entry.get("name", "?")), ready_tag]
 		_roster_labels[i].visible = true
+	if show_roster:
+		_refresh_lobby_detail()
+
+
+func _refresh_lobby_detail() -> void:
+	# The host's room code stays prominently visible in the lobby; the
+	# status line may be overwritten by transient events.
+	if bool(_service.is_host):
+		_detail.text = "ROOM CODE: %s\nShare it - players join with JOIN ROOM" % String(_service.session_code())
+	else:
+		_detail.text = "WAITING FOR THE HOST TO START"
 
 
 func _process(_delta: float) -> void:
@@ -367,16 +350,27 @@ func _on_lobby_changed() -> void:
 		_refresh_roster()
 
 
-func _on_browse_done(_ok: bool, message: String) -> void:
-	if _mode == ScreenMode.BROWSE:
-		_status.text = message
-		_set_items(_browse_items())
+func _on_state_changed() -> void:
+	## Screen transitions driven by the service: create/join completion
+	## swaps the entry/code screens for the lobby. Round-end LOBBY
+	## transitions are excluded - the results overlay owns that flow
+	## until the host returns everyone to the lobby.
+	if _service == null:
+		return
+	var current: int = int(_service.state)
+	if current == _service.State.LOBBY and _last_service_state in [
+		_service.State.CREATING_LOBBY,
+		_service.State.JOINING,
+		_service.State.CONNECTING,
+	]:
+		open_lobby()
+	_last_service_state = current
 
 
-func _on_address_submitted(text: String) -> void:
+func _on_code_submitted(text: String) -> void:
 	if _host == null:
 		return
-	_host.cmd_online_join_address(text)
+	_host.cmd_online_join_code(text)
 
 
 # -------------------------------------------------------------------- input
@@ -384,9 +378,9 @@ func _on_address_submitted(text: String) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not visible:
 		return
-	if _mode == ScreenMode.ADDRESS:
+	if _mode == ScreenMode.CODE:
 		if event.is_action_pressed("ui_cancel"):
-			_input_back_from_address()
+			_input_back_from_code()
 			get_viewport().set_input_as_handled()
 		return
 	if _items.is_empty():
@@ -406,9 +400,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-func _input_back_from_address() -> void:
-	_address_edit.visible = false
-	_address_edit.release_focus()
+func _input_back_from_code() -> void:
+	_code_edit.visible = false
+	_code_edit.release_focus()
 	open_entry()
 
 
@@ -436,8 +430,6 @@ func _back() -> void:
 		ScreenMode.ENTRY:
 			if _host != null:
 				_host.cmd_online_back()
-		ScreenMode.BROWSE:
-			open_entry()
 		ScreenMode.LOBBY:
 			# Lobby back leaves the session deliberately (explicit action).
 			if _host != null:

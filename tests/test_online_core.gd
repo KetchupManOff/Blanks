@@ -1,7 +1,10 @@
 extends "res://tests/test_lib.gd"
 ## Online co-op core unit tests: deterministic snapshots (bag/board/event
-## state), snapshot validation, input intent validation, and the transport
-## chunking helper. Pure headless: no EOSG, no network.
+## state), snapshot validation, input intent validation, the transport
+## chunking helper, the relay envelope codec, room-code rules, and
+## service-level validation of inbound envelopes (sender/role/version/
+## size). Pure headless: the only transport is the in-memory relay hub,
+## never a network.
 
 const CoopGameScript = preload("res://scripts/core/coop_game.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
@@ -9,11 +12,14 @@ const TetrominoData = preload("res://scripts/core/tetromino_data.gd")
 const PlayConfig = preload("res://scripts/core/constants.gd")
 const InputIntent = preload("res://scripts/online/input_intent.gd")
 const ServiceScript = preload("res://scripts/online/online_service.gd")
-const Credentials = preload("res://scripts/online/online_credentials.gd")
+const NetScript = preload("res://scripts/online/online_net.gd")
+const RelayContract = preload("res://scripts/online/relay_connection.gd")
+const RelayMemory = preload("res://scripts/online/relay_memory.gd")
 
 const MARATHON = ModeRules.Mode.MARATHON
 
 var _next_seed: int = 424242
+var _service: Node = null
 
 
 func _new_coop(count: int = 2, mode: int = MARATHON) -> RefCounted:
@@ -24,6 +30,24 @@ func _new_coop(count: int = 2, mode: int = MARATHON) -> RefCounted:
 func _tick(game: RefCounted, steps: int) -> void:
 	for i in steps:
 		game.tick(PlayConfig.FIXED_STEP)
+
+
+## One in-tree service with a fresh in-memory relay hub, ready for room
+## flows or direct envelope dispatch.
+func _ensure_service() -> Node:
+	if _service == null or not is_instance_valid(_service):
+		_service = ServiceScript.new()
+		_service.name = "OnlineCoreSvc"
+		tree.root.add_child(_service)
+	_service.leave_session()
+	_service.use_memory_relay(RelayMemory.new())
+	return _service
+
+
+func teardown() -> void:
+	if _service != null:
+		_service.queue_free()
+		_service = null
 
 
 # ---------------------------------------------------------------- snapshots
@@ -198,13 +222,165 @@ func test_snapshot_chunking() -> void:
 	service.free()
 
 
-# ------------------------------------------------------------ credentials
+# ---------------------------------------------------------------- envelopes
 
-func test_credentials_example_is_committable() -> void:
-	## The committed example template parses and yields every expected key,
-	## with placeholder (non-secret) values.
-	var creds: Dictionary = Credentials.load_credentials()
-	check_eq(String(creds.get("_source", "")), "", "no local credentials file in test environment")
-	for key in ["product_name", "product_version", "product_id", "sandbox_id", "deployment_id", "client_id", "client_secret", "encryption_key", "auth_mode"]:
-		check(creds.has(key), "credentials defaults include %s" % key)
-	check_false(Credentials.is_configured(creds), "placeholder defaults never count as configured")
+func test_envelope_round_trip() -> void:
+	var net := NetScript.new()
+	var payload := net.encode(NetScript.MSG_LOBBY_STATE, 1, {"mode": 2, "phase": "lobby"})
+	var envelope := net.decode(payload)
+	check_eq(String(envelope.get("t")), NetScript.MSG_LOBBY_STATE, "message type preserved")
+	check_eq(int(envelope.get("v")), 1, "protocol version preserved")
+	check_eq(envelope.get("d"), {"mode": 2, "phase": "lobby"}, "payload preserved")
+
+
+func test_envelope_round_trip_with_bytes() -> void:
+	var net := NetScript.new()
+	var blob := PackedByteArray([1, 2, 3, 250])
+	var payload := net.encode(
+		NetScript.MSG_SNAPSHOT, 1, {"id": 1, "part": 0, "count": 1, "bytes": blob}
+	)
+	var envelope := net.decode(payload)
+	var data: Dictionary = envelope.get("d")
+	check_eq(data.get("bytes"), blob, "packed bytes preserved")
+	check_eq(int(data.get("count")), 1, "nested integers preserved")
+
+
+func test_envelope_rejects_malformed_payloads() -> void:
+	var net := NetScript.new()
+	check_eq(net.decode(PackedByteArray()), {}, "empty payload rejected")
+	var garbage := PackedByteArray()
+	garbage.resize(40)
+	for i in 40:
+		garbage[i] = (i * 7) % 256
+	check_eq(net.decode(garbage), {}, "garbage bytes rejected")
+	check_eq(net.decode(var_to_bytes([1, 2, 3])), {}, "non-dictionary rejected")
+	check_eq(net.decode(var_to_bytes({"v": 1, "d": {}})), {}, "missing type rejected")
+	check_eq(net.decode(var_to_bytes({"t": "", "v": 1, "d": {}})), {}, "empty type rejected")
+	check_eq(net.decode(var_to_bytes({"t": "x", "v": 0, "d": {}})), {}, "bad version rejected")
+	check_eq(net.decode(var_to_bytes({"t": "x", "v": 1})), {}, "missing data rejected")
+
+
+func test_envelope_rejects_oversized_payloads() -> void:
+	var net := NetScript.new()
+	var big := PackedByteArray()
+	big.resize(NetScript.MAX_ENVELOPE_BYTES + 1)
+	check_eq(net.decode(big), {}, "oversized envelope rejected before dispatch")
+
+
+# -------------------------------------------------------------- room codes
+
+func test_room_code_rules() -> void:
+	check_eq(RelayContract.normalize_room_code("  ab c-d "), "ABCD", "case/spacing/dashes normalized")
+	check_eq(RelayContract.normalize_room_code("K7QPZM2"), "K7QPZM2", "already-clean code unchanged")
+	check_true(RelayContract.is_valid_room_code("ABCDEFG"), "7-letter code valid")
+	check_true(RelayContract.is_valid_room_code("ABCD"), "short code valid (relay is authoritative on length)")
+	check_false(RelayContract.is_valid_room_code("ABC"), "too short rejected")
+	check_false(RelayContract.is_valid_room_code("ABCDEFGHIJKLMNOPQ"), "too long rejected")
+	check_false(RelayContract.is_valid_room_code("ABC1"), "digit rejected")
+	check_false(RelayContract.is_valid_room_code("ABCI"), "ambiguous I rejected")
+	check_false(RelayContract.is_valid_room_code("ABCO"), "ambiguous O rejected")
+	check_false(RelayContract.is_valid_room_code("ABCU"), "ambiguous U rejected")
+
+
+func test_join_rejects_invalid_codes_locally() -> void:
+	var service := _ensure_service()
+	check_true(service.ensure_ready(), "service READY with the test endpoint")
+	service.join_lobby("12!!")
+	check_eq(service.state, ServiceScript.State.ERROR, "invalid code rejected before any relay round trip")
+	check_true(
+		String(service.status_text).contains("Invalid room code"),
+		"invalid code surfaces an actionable status"
+	)
+	# ERROR is retryable: a well-formed-but-unknown code starts a fresh
+	# flow and the in-memory relay answers not_found.
+	service.join_lobby("ZZZZZZZ")
+	check_eq(service.state, ServiceScript.State.ERROR, "unknown code surfaces the relay rejection")
+	check_true(
+		String(service.status_text).contains("Room not found"),
+		"unknown code surfaces an actionable status"
+	)
+	service.leave_session()
+	check_eq(service.state, ServiceScript.State.READY, "leave returns to READY")
+
+
+# --------------------------------------------------- inbound frame validation
+
+func test_host_ignores_host_only_messages_from_non_host() -> void:
+	## Host-only broadcasts (lobby state, match start, results, return)
+	## are ignored unless the relay-stamped sender is the host (peer 1).
+	var service := _ensure_service()
+	check_true(service.ensure_ready(), "READY")
+	check_true(service.create_lobby(), "room created")
+	var mode_before: int = service.lobby_mode
+	service._net.receive(3, NetScript.encode(
+		NetScript.MSG_LOBBY_STATE, 1, {"mode": 99, "phase": "match", "roster": []}
+	))
+	service._net.receive(3, NetScript.encode(
+		NetScript.MSG_MATCH_STARTED, 1, {"mode": 99, "seed": 1, "player_count": 1, "roster": []}
+	))
+	service._net.receive(3, NetScript.encode(
+		NetScript.MSG_ROUND_FINISHED, 1, {"title": "X", "subtitle": ""}
+	))
+	service._net.receive(3, NetScript.encode(NetScript.MSG_RETURN_TO_LOBBY, 1, {}))
+	check_eq(service.roster.size(), 1, "roster untouched by non-host state")
+	check_eq(service.state, ServiceScript.State.LOBBY, "host stays in LOBBY")
+	check_eq(service.lobby_mode, mode_before, "mode untouched")
+	service.leave_session()
+
+
+func test_host_rejects_unrostered_and_wrong_version_hellos() -> void:
+	var service := _ensure_service()
+	check_true(service.ensure_ready(), "READY")
+	check_true(service.create_lobby(), "room created")
+	# Wrong protocol version: rejected before any handler runs.
+	service._net.receive(2, NetScript.encode(NetScript.MSG_CLIENT_HELLO, 999, {"name": "Rogue"}))
+	check_eq(service.roster.size(), 1, "wrong-version hello never rosters")
+	# The host itself can never be rostered as a client.
+	service._net.receive(1, NetScript.encode(NetScript.MSG_CLIENT_HELLO, 1, {"name": "Twin"}))
+	check_eq(service.roster.size(), 1, "host never rosters itself")
+	# Malformed payloads are ignored entirely.
+	service._net.receive(2, PackedByteArray([1, 2, 3]))
+	check_eq(service.roster.size(), 1, "garbage frame ignored")
+	service._net.receive(2, var_to_bytes([1, 2, 3]))
+	check_eq(service.roster.size(), 1, "non-dictionary envelope ignored")
+	# Unknown message types are dropped with a warning, never dispatched.
+	service._net.receive(2, NetScript.encode("bogus_type", 1, {}))
+	check_eq(service.roster.size(), 1, "unknown message type ignored")
+	service.leave_session()
+
+
+func test_client_ignores_client_only_messages() -> void:
+	## Client-only messages (hello, ready, intents) are ignored by a client
+	## no matter who sent them.
+	var service := _ensure_service()
+	service.is_host = false
+	service.roster = [{"peer_id": 1, "name": "H", "ready": true, "slot": 0, "connected": true}]
+	service._set_state(ServiceScript.State.LOBBY)
+	service._net.receive(1, NetScript.encode(NetScript.MSG_CLIENT_HELLO, 1, {"name": "X"}))
+	service._net.receive(1, NetScript.encode(NetScript.MSG_SET_READY, 1, {"ready": true}))
+	service._net.receive(1, NetScript.encode(
+		NetScript.MSG_INTENT, 1, {"slot": 0, "seq": 1, "action": "move", "arg": -1}
+	))
+	check_eq(service.roster.size(), 1, "client ignores client-only messages (no roster change)")
+	service.leave_session()
+
+
+# ------------------------------------------------------------- size limits
+
+func test_send_refuses_oversized_envelopes() -> void:
+	var service := _ensure_service()
+	check_true(service.ensure_ready(), "READY")
+	check_true(service.create_lobby(), "room created")
+	var blob := PackedByteArray()
+	blob.resize(NetScript.MAX_ENVELOPE_BYTES)
+	check_false(
+		service._send_envelope(NetScript.MSG_LOBBY_STATE, {"blob": blob}),
+		"oversized payload refused before the transport"
+	)
+	var huge := PackedByteArray()
+	huge.resize(RelayMemory.MAX_FRAME_BYTES + 1)
+	check_false(
+		service._relay.send(huge),
+		"transport rejects frames past the relay packet limit"
+	)
+	service.leave_session()

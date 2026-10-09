@@ -1,0 +1,8 @@
+# Caddy terminates TLS for the relay (automatic certificates via
+# Let's Encrypt). Replace relay.example.com with your domain.
+#
+# Caddy proxies WebSocket upgrades natively; no extra directives needed.
+
+relay.example.com {
+	reverse_proxy relay:8080
+}

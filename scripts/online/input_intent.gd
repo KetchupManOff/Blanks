@@ -73,7 +73,7 @@ static func tick_guard(guard: IntentGuard, now_msec: int) -> void:
 
 
 ## Validate one inbound intent against a sender's guard.
-## `slot_of_peer` maps the sender's multiplayer peer id to its assigned
+## `slot_of_peer` maps the sender's relay peer id to its assigned
 ## player slot (-1 when the sender owns no slot). `phase_active` gates the
 ## whole path: no intents apply outside the ACTIVE phase.
 static func validate(

@@ -2,16 +2,14 @@
 .godot/
 *.translation
 
-# EOS credentials - never commit real keys
+# Relay (Node.js) dependencies and local configuration
+node_modules/
+relay/.env
+
+# Legacy EOS credential files stay ignored so old local copies never
+# surface after the EOS removal (see ONLINE_SETUP.md)
 eos_credentials.cfg
 user_credentials.cfg
-
-# EOS transport build artifacts (binaries are built into the EOSG addon tree)
-addons/eos-transport/bin/
-addons/eos-transport/scons/
-
-# EOS SDK / build environment (not redistributed)
-addons/epic-online-services-godot/bin/EOS_SDK/
 
 # Exports
 Exports/

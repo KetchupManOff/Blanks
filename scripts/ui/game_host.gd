@@ -26,7 +26,6 @@ const CoopSetupMenu = preload("res://scripts/ui/coop_setup_menu.gd")
 const ProfileScreen = preload("res://scripts/ui/profile_screen.gd")
 const OnScreenKeyboard = preload("res://scripts/ui/on_screen_keyboard.gd")
 const OnlineMenu = preload("res://scripts/ui/online_menu.gd")
-const ProofScene = preload("res://scenes/network_p2p_proof.tscn")
 const ThemeManager = preload("res://scripts/ui/theme_manager.gd")
 const ThemeProfile = preload("res://scripts/ui/theme_profile.gd")
 const MediaBackdrop = preload("res://scripts/ui/media_backdrop.gd")
@@ -83,15 +82,15 @@ var _accumulator: float = 0.0
 var _settings_origin: int = HostState.MAIN_MENU
 
 # --- Online session integration ---
-# The OnlineService autoload owns every networking concern (auth, lobby,
-# transport, RPC protocol, snapshot stream); GameHost keeps the run
-# lifecycle and delegates. Null in tests and plain offline builds.
+# The OnlineService autoload owns every networking concern (relay room
+# lifecycle, transport, envelope protocol, snapshot stream); GameHost
+# keeps the run lifecycle and delegates. Null in tests and plain
+# offline builds.
 var online_role: int = OnlineRole.LOCAL
 var _online_service: Node = null
 var _online_menu: CanvasLayer = null
 var _online_slot: int = -1  # this machine's roster slot while online
 var _online_signature: int = -1  # last broadcast sim signature (host)
-var _online_proof: Node = null  # debug P2P replication proof scene
 # True while settings was opened from the profile screen: Back returns to
 # the profile browser instead of the main menu.
 var _settings_from_profiles: bool = false
@@ -596,7 +595,7 @@ func _player_accent(index: int) -> Color:
 ## Co-op player label: "P# <profile name>" so profile ownership is visible
 ## during play; falls back to the bare player tag for untracked slots.
 ## Online assignments carry the peer's display name instead of a local
-## profile id (EOS identities are anonymous/device-local).
+## profile id (local profiles are never shared online).
 func _coop_profile_display_name(player: int) -> String:
 	if player < 0 or player >= _coop_assignments.size():
 		return ""
@@ -769,7 +768,7 @@ func cmd_start_coop(assignments: Array, game_mode: int) -> void:
 
 func cmd_quit() -> void:
 	if _online_service != null:
-		# Best-effort EOS teardown before the process exits.
+		# Best-effort relay room leave before the process exits.
 		_online_service.shutdown()
 	settings.save()
 	get_tree().quit()
@@ -1565,12 +1564,13 @@ func auto_pause_on_focus_loss() -> void:
 
 
 # ------------------------------------------------------------------- online
-# Online co-op over EOS P2P (see scripts/online/). GameHost remains the
-# orchestration boundary: UI calls the cmd_* commands below, which delegate
-# to the OnlineService autoload; the service calls back into the hooks in
-# this section. The authoritative CoopGame lives on the host only - clients
-# hold snapshot-driven twins - and all traffic flows through MultiplayerPeer
-# RPCs, never raw EOS packets.
+# Relay-backed online co-op (see scripts/online/ and relay/). GameHost
+# remains the orchestration boundary: UI calls the cmd_* commands below,
+# which delegate to the OnlineService autoload; the service calls back
+# into the hooks in this section. The authoritative CoopGame lives on
+# the host only - clients hold snapshot-driven twins - and all traffic
+# flows through the relay connection's game envelopes, never raw
+# sockets.
 
 func online_is_local() -> bool:
 	return online_role == OnlineRole.LOCAL
@@ -1612,29 +1612,18 @@ func cmd_online_create() -> void:
 		_online_menu.refresh_status()
 
 
-func cmd_online_browse() -> void:
-	if _online_service == null:
-		return
-	await _online_service.ensure_ready()
-	_online_service.browse()
+func cmd_online_join_code_open() -> void:
+	## Entry screen: open the room-code join field.
+	_online_menu.open_code()
 
 
-func cmd_online_join_address_open() -> void:
-	## Entry screen: open the direct id/address join field.
-	_online_menu.open_address()
-
-
-func cmd_online_join_address(address: String) -> void:
-	## Address/lobby-id field submit. Empty input re-opens the entry screen.
-	if _online_service == null or address.strip_edges().is_empty():
+func cmd_online_join_code(code: String) -> void:
+	## Room-code field submit. Empty input re-opens the entry screen.
+	if _online_service == null or code.strip_edges().is_empty():
 		_online_menu.open_entry()
 		return
 	await _online_service.ensure_ready()
-	_online_service.join_lobby(address)
-
-
-func cmd_online_browse_back() -> void:
-	_online_menu.open_entry()
+	_online_service.join_lobby(code)
 
 
 func cmd_online_toggle_ready() -> void:
@@ -1646,26 +1635,12 @@ func cmd_online_toggle_ready() -> void:
 func _online_roster_self_ready() -> bool:
 	if _online_service == null:
 		return false
-	var mine: int = _online_service.multiplayer.get_unique_id()
+	var mine: int = _online_service.local_peer_id()
 	var roster: Array = _online_service.roster
 	for entry in roster:
 		if int(entry["peer_id"]) == mine:
 			return bool(entry["ready"])
 	return false
-
-
-func cmd_online_join_index(index: int) -> void:
-	## Join one of the browsed lobbies by list index.
-	if _online_service == null:
-		return
-	var results: Array = _online_service.browse_results
-	if index < 0 or index >= results.size():
-		return
-	var lobby_id := String((results[index] as Dictionary).get("lobby_id", ""))
-	if lobby_id.is_empty():
-		return
-	await _online_service.ensure_ready()
-	_online_service.join_lobby(lobby_id)
 
 
 func cmd_online_leave() -> void:
@@ -1721,28 +1696,6 @@ func cmd_online_return_to_lobby() -> void:
 	_online_service.host_return_to_lobby()
 
 
-func cmd_online_open_proof() -> void:
-	## Debug/editor builds only: native replication proof over the ACTIVE
-	## session transport (EOS in production, the ENet harness in dev).
-	## Requires a live session - the transport must already be installed.
-	if not (OS.is_debug_build() or OS.has_feature("editor")):
-		return
-	if _online_service == null or not _online_service.is_in_session():
-		return
-	if _online_proof != null:
-		return
-	_online_proof = ProofScene.instantiate()
-	add_child(_online_proof)
-	_online_proof.begin(bool(_online_service.is_host), String(_online_service.session_code()))
-
-
-func cmd_online_close_proof() -> void:
-	if _online_proof != null:
-		var proof := _online_proof
-		_online_proof = null
-		proof.close()
-
-
 # ------------------------------------------------------- service callbacks
 
 func online_begin_host_match(config: Dictionary) -> void:
@@ -1774,8 +1727,8 @@ func _begin_online_run(config: Dictionary, role: int, own_slot: int) -> void:
 	_hud.set_combo("")
 	_hud.set_event("", 0)
 	_coop_assignments = _online_roster_assignments(config.get("roster", []))
-	# Online players carry anonymous EOS identities (Device ID logins are
-	# not local profiles): online runs never append result records.
+	# Online players carry relay identities (their local profiles are not
+	# shared): online runs never append result records.
 	_run_profile_ids = []
 	_run_result_recorded = true
 	var own_profile := String(settings.active_profile_id) if settings != null else ""
@@ -1915,7 +1868,7 @@ func _finish_online_round(title: String, subtitle: String) -> void:
 
 func online_return_to_lobby() -> void:
 	## Service hook: host sent everyone back to the lobby (host action or
-	## client receipt of the return RPC).
+	## client receipt of the return envelope).
 	_online_teardown_run()
 	_pause_menu.close()
 	_settings_screen.close()
@@ -1928,11 +1881,10 @@ func online_return_to_lobby() -> void:
 
 
 func online_leave_session(_was_in_match: bool) -> void:
-	## Service hook: transport/lobby is gone (leave/kick/disconnect).
+	## Service hook: transport/room is gone (leave/disconnect).
 	## Menu state is managed by the calling flow.
 	_online_teardown_run()
 	_settings_screen.close()
-	cmd_online_close_proof()
 
 
 func online_session_error(_text: String) -> void:

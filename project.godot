@@ -29,6 +29,14 @@ window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 
+[online]
+
+; Relay endpoint for online co-op (see ONLINE_SETUP.md): set this to
+; your deployed wss:// relay before exporting. The TYE_RELAY_URL
+; environment variable overrides it for development and staging, and
+; plain ws:// is accepted only in debug builds.
+relay_url=""
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

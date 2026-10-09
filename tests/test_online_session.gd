@@ -1,18 +1,20 @@
 extends "res://tests/test_lib.gd"
 ## End-to-end online session protocol tests: two OnlineService instances
-## (host + client), each with its own custom MultiplayerAPI rooted at its
-## node path, talking over the ENet dev harness (debug builds only). This
-## exercises the REAL wire protocol - lobby handshake, roster broadcast,
-## ready gate, match start, intents, chunked snapshots, results, return to
-## lobby, and disconnect teardown - without EOSG or a network.
-##
-## Frames are pumped manually (poll each MultiplayerAPI + call _process on
-## each service) because the test runner executes synchronously.
+## (host + client), each attached to a shared in-memory relay hub
+## (relay_memory.gd) that mirrors the deployed relay's semantics. This
+## exercises the REAL wire protocol - room create/join, hello handshake,
+## roster broadcast, ready gate, match start, intents, chunked
+## snapshots, results, return to lobby, and disconnect teardown -
+## without a network: sends land synchronously in the receiver's inbox
+## and frames are pumped by stepping each service's _process.
 
 const CoopGameScript = preload("res://scripts/core/coop_game.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 const PlayConfig = preload("res://scripts/core/constants.gd")
 const ServiceScript = preload("res://scripts/online/online_service.gd")
+const NetScript = preload("res://scripts/online/online_net.gd")
+const RelayMemory = preload("res://scripts/online/relay_memory.gd")
+const RelayMemoryConnection = preload("res://scripts/online/relay_connection_memory.gd")
 
 const ACTIVE_PHASE = 0
 
@@ -93,14 +95,11 @@ var _host_svc: Node = null
 var _client_svc: Node = null
 var _host_stub: StubHost = null
 var _client_stub: StubHost = null
-var _host_mp: SceneMultiplayer = null
-var _client_mp: SceneMultiplayer = null
+var _hub: RelayMemory = null
+var _extras: Array = []
 
 
 func setup() -> void:
-	if not ServiceScript.dev_transport_allowed():
-		push_warning("session tests skipped (release build without the dev harness)")
-		return
 	_host_stub = StubHost.new()
 	tree.root.add_child(_host_stub)
 	_client_stub = StubHost.new()
@@ -116,34 +115,63 @@ func setup() -> void:
 	tree.root.add_child(_client_svc)
 	_client_svc.game_host = _client_stub
 
-	_host_mp = SceneMultiplayer.new()
-	tree.set_multiplayer(_host_mp, NodePath("/root/HostSvc"))
-	_client_mp = SceneMultiplayer.new()
-	tree.set_multiplayer(_client_mp, NodePath("/root/ClientSvc"))
+	_reset_session()
 
 
 func teardown() -> void:
-	if _host_svc != null and _host_svc.multiplayer.multiplayer_peer != null:
-		_host_svc.multiplayer.multiplayer_peer.close()
-	if _client_svc != null and _client_svc.multiplayer.multiplayer_peer != null:
-		_client_svc.multiplayer.multiplayer_peer.close()
 	if _host_svc != null:
+		_host_svc.leave_session()
 		_host_svc.queue_free()
 	if _client_svc != null:
+		_client_svc.leave_session()
 		_client_svc.queue_free()
+	for svc in _extras:
+		svc.leave_session()
+		svc.queue_free()
+	_extras = []
 	if _host_stub != null:
 		_host_stub.queue_free()
 	if _client_stub != null:
 		_client_stub.queue_free()
 
 
-## Manual frame pump: poll each multiplayer domain (drives the ENet peer +
-## packet dispatch, firing peer_connected/RPC handlers) and step each
-## service (connect timeout bookkeeping). ENet's connect handshake needs
-## real wall-clock time between service() calls, so every step burns a few
-## real milliseconds; the loop is condition-driven so it settles as soon
-## as the protocol advances (default budget ~2s).
-func _pump_until(predicate: Callable, max_steps: int = 500) -> bool:
+## Reset any session left over from a previous test in this suite (the
+## runner shares one setup() across tests) and pair both services with
+## a fresh in-memory relay hub.
+func _reset_session() -> void:
+	if _client_svc != null:
+		_client_svc.leave_session()
+	if _host_svc != null:
+		_host_svc.leave_session()
+	_hub = RelayMemory.new()
+	_host_svc.use_memory_relay(_hub)
+	_client_svc.use_memory_relay(_hub)
+	_host_stub.coop = null
+	_client_stub.coop = null
+	_host_stub.intents = []
+	_host_stub.begins = 0
+	_client_stub.begins = 0
+	_client_stub.snapshots_applied = 0
+	_client_stub.results = []
+	_client_stub.lobby_returns = 0
+	_client_stub.leaves = 0
+	_client_stub.errors = []
+
+
+## Extra client services for multi-client tests, freed in teardown.
+func _make_client_service(service_name: String) -> Node:
+	var svc: Node = ServiceScript.new()
+	svc.name = service_name
+	tree.root.add_child(svc)
+	_extras.append(svc)
+	return svc
+
+
+## Manual frame pump: each step polls both services; the in-memory
+## relay delivers synchronously into receiver inboxes, so host->client
+## or client->host round trips complete within a step or two and the
+## loop is purely logic-driven (no wall-clock waiting).
+func _pump_until(predicate: Callable, max_steps: int = 200) -> bool:
 	for i in max_steps:
 		if predicate.call():
 			return true
@@ -151,17 +179,12 @@ func _pump_until(predicate: Callable, max_steps: int = 500) -> bool:
 	return predicate.call()
 
 
-func _pump(steps: int = 25) -> void:
+func _pump(steps: int = 10) -> void:
 	for i in steps:
 		_step_frame()
 
 
 func _step_frame() -> void:
-	OS.delay_msec(4)
-	if _host_mp != null and _host_mp.multiplayer_peer != null:
-		_host_mp.poll()
-	if _client_mp != null and _client_mp.multiplayer_peer != null:
-		_client_mp.poll()
 	if _host_svc != null:
 		_host_svc._process(0.016)
 	if _client_svc != null:
@@ -176,67 +199,48 @@ func _in_lobby(service: Node) -> bool:
 	return service != null and service.state == ServiceScript.State.LOBBY
 
 
+func _client_ready() -> bool:
+	return _host_svc.roster.size() == 2 and bool(_host_svc.roster[1]["ready"])
+
+
 # ---------------------------------------------------------------------- tests
 
-## Reset any session left over from a previous test in this suite (the
-## runner shares one setup() across tests).
-func _reset_session() -> void:
-	if _client_svc != null:
-		_client_svc.leave_session()
-	if _host_svc != null:
-		_host_svc.leave_session()
-	_host_stub.coop = null
-	_client_stub.coop = null
-	_host_stub.intents = []
-	_host_stub.begins = 0
-	_client_stub.begins = 0
-	_client_stub.snapshots_applied = 0
-	_client_stub.results = []
-	_client_stub.lobby_returns = 0
-	_client_stub.leaves = 0
-	_client_stub.errors = []
-
-
 func test_full_session_flow() -> void:
-	## One full round: lobby create/join/handshake, ready gate, match start,
-	## intents client->host, snapshots host->client, results, lobby return,
-	## ready reset, disconnect teardown.
-	if not ServiceScript.dev_transport_allowed():
-		return
+	## One full round: room create/join/handshake, ready gate, match
+	## start, intents client->host, snapshots host->client, results,
+	## lobby return, ready reset, second round, client leave teardown.
 	_reset_session()
 
-	check_true(await _host_svc.ensure_ready(), "host reaches READY in dev mode")
-	check_true(await _client_svc.ensure_ready(), "client reaches READY in dev mode")
+	check_true(_host_svc.ensure_ready(), "host reaches READY")
+	check_true(_client_svc.ensure_ready(), "client reaches READY")
 
-	# --- lobby create (host installs the dev transport) ---
-	var lobby_ok: bool = await _host_svc.create_lobby()
-	check_true(lobby_ok, "dev lobby created")
+	# --- room create (host connects to the relay and becomes peer 1) ---
+	check_true(_host_svc.create_lobby(), "room create flow completed")
 	check_eq(_host_svc.state, ServiceScript.State.LOBBY, "host in LOBBY")
 	check_true(_host_svc.is_host, "host role set")
 	check_eq(_host_svc.roster.size(), 1, "host rostered alone")
 	check_eq(_host_svc.own_slot, 0, "host owns slot 0")
-	var address: String = _host_svc.session_code()
-	check_false(address.is_empty(), "dev lobby address exposed for joining")
+	var code: String = _host_svc.session_code()
+	check_false(code.is_empty(), "room code exposed for joining")
+	check_eq(code.length(), 7, "room code uses the 7-character relay format")
+	check_eq(_host_svc.local_peer_id(), 1, "host is relay peer 1")
 
-	# --- join (client transport + handshake + roster broadcast) ---
-	await _client_svc.join_lobby(address)
+	# --- join + hello handshake + roster broadcast ---
+	_client_svc.join_lobby(code)
 	check_eq(_client_svc.state, ServiceScript.State.CONNECTING, "client CONNECTING after join")
+	check_eq(_client_svc.local_peer_id(), 2, "client assigned relay peer 2")
 	check_true(_pump_until(func() -> bool: return _in_lobby(_client_svc)), "client reaches LOBBY after handshake")
 	if not _in_lobby(_client_svc):
 		return
 	check_eq(_client_svc.own_slot, 1, "client assigned slot 1")
 	check_eq(_client_svc.roster.size(), 2, "client sees full roster")
-	check_true(_pump_until(func() -> bool: return _host_svc.roster.size() == 2), "host roster includes client")
 	check_eq(_host_svc.roster.size(), 2, "host roster includes client")
+	check_eq(int(_host_svc.roster[1]["peer_id"]), 2, "host rostered the relay-stamped peer id")
 
 	# --- ready gate: start is blocked until the client is ready ---
 	check_false(_host_svc.start_round(), "start blocked before client ready")
 	_client_svc.set_ready(true)
-	check_true(
-		_pump_until(func() -> bool:
-			return _host_svc.roster.size() == 2 and bool(_host_svc.roster[1]["ready"])),
-		"host sees client ready"
-	)
+	check_true(_pump_until(_client_ready), "host sees client ready")
 	check_true(bool(_host_svc.roster[1]["ready"]), "host sees client ready")
 
 	# --- match start (config broadcast, role split) ---
@@ -251,11 +255,11 @@ func test_full_session_flow() -> void:
 	check_eq(_client_stub.coop.player_count, 2, "twin built for the same roster size")
 	check_eq(_client_stub.coop.mode, _host_stub.coop.mode, "mode travels in match config")
 	check_eq(_client_stub.coop.seed, _host_stub.coop.seed, "seed travels in match config")
-	# GameHost sends the authoritative initial state reliably at match start.
+	# GameHost sends the authoritative initial state immediately at match start.
 	_host_svc.host_match_frame(0.0, true)
 	check_true(
 		_pump_until(func() -> bool: return _client_stub.snapshots_applied >= 1),
-		"initial reliable snapshot arrived"
+		"initial snapshot arrived"
 	)
 
 	# --- intents: client moves its own slot, host validates + applies ---
@@ -270,12 +274,12 @@ func test_full_session_flow() -> void:
 		check_eq(String(_host_stub.intents[0]["action"]), "move", "intent action preserved")
 	# Foreign slots never even send (client-side ownership guard).
 	_client_svc.submit_intent(0, "move", -1)
-	_pump(20)
+	_pump(10)
 	check_eq(_host_stub.intents.size(), 1, "client cannot act on foreign slots")
 
-	# --- snapshots: structural reliable snapshot converges the twin ---
+	# --- snapshots: structural snapshot converges the twin ---
 	_tick_host(30)
-	_host_svc.host_match_frame(0.0, true)  # structural -> reliable
+	_host_svc.host_match_frame(0.0, true)  # structural -> immediate
 	check_true(
 		_pump_until(func() -> bool: return _client_stub.snapshots_applied >= 2),
 		"further snapshots applied"
@@ -288,7 +292,7 @@ func test_full_session_flow() -> void:
 			"client board converged to the host board"
 		)
 
-	# --- results: host broadcasts, both keep the lobby (EOS persists) ---
+	# --- results: host broadcasts, both keep the room (relay persists) ---
 	_host_svc.host_round_finished({"title": "GAME OVER", "subtitle": "test round"})
 	check_eq(_host_svc.state, ServiceScript.State.LOBBY, "host returns to LOBBY after the round")
 	check_false(bool(_host_svc.roster[1]["ready"]), "ready flags reset after the round")
@@ -312,11 +316,10 @@ func test_full_session_flow() -> void:
 	# --- ready gate again for the next round ---
 	_client_svc.set_ready(true)
 	check_true(
-		_pump_until(func() -> bool:
-			return _host_svc.roster.size() == 2 and bool(_host_svc.roster[1]["ready"])),
-		"ready toggles again in the persistent lobby"
+		_pump_until(_client_ready),
+		"ready toggles again in the persistent room"
 	)
-	check_true(_host_svc.start_round(), "second round starts from the same lobby")
+	check_true(_host_svc.start_round(), "second round starts from the same room")
 	check_eq(_host_stub.begins, 2, "second round begins on the host")
 	check_true(_pump_until(func() -> bool:
 		return _in_match(_client_svc) and _client_stub.begins == 2), "second round begins on the client")
@@ -328,38 +331,31 @@ func test_full_session_flow() -> void:
 		_pump_until(func() -> bool: return _host_svc.roster.size() == 1),
 		"host roster shrinks after client leave"
 	)
-	check_eq(_client_svc.state, ServiceScript.State.OFFLINE, "client back OFFLINE after leave")
+	check_eq(_client_svc.state, ServiceScript.State.READY, "client back at READY after leave")
 	check_eq(_client_stub.leaves, 1, "client host hook observed the leave")
+	check_eq(_host_svc.state, ServiceScript.State.IN_MATCH, "host match continues after the leave")
 
 
 func test_client_loses_host_mid_match() -> void:
 	## Losing the host mid-match surfaces an actionable error and tears the
 	## session down (no host migration).
-	if not ServiceScript.dev_transport_allowed():
-		return
 	_reset_session()
 
-	check_true(await _host_svc.ensure_ready(), "host READY")
-	check_true(await _client_svc.ensure_ready(), "client READY")
-	var lobby_ok: bool = await _host_svc.create_lobby()
-	check_true(lobby_ok, "lobby created")
-	var address: String = _host_svc.session_code()
-	await _client_svc.join_lobby(address)
+	check_true(_host_svc.ensure_ready(), "host READY")
+	check_true(_client_svc.ensure_ready(), "client READY")
+	check_true(_host_svc.create_lobby(), "room created")
+	var code: String = _host_svc.session_code()
+	_client_svc.join_lobby(code)
 	check_true(_pump_until(func() -> bool: return _in_lobby(_client_svc)), "client joined")
 
 	_client_svc.set_ready(true)
-	check_true(
-		_pump_until(func() -> bool:
-			return _host_svc.roster.size() == 2 and bool(_host_svc.roster[1]["ready"])),
-		"client ready"
-	)
+	check_true(_pump_until(_client_ready), "client ready")
 	check_true(_host_svc.start_round(), "round started")
 	check_true(_pump_until(func() -> bool: return _in_match(_client_svc)), "client in match")
 	check_eq(_client_svc.state, ServiceScript.State.IN_MATCH, "client in match")
 
 	# Host vanishes: close the transport directly (simulate crash/quit).
-	_host_svc.multiplayer.multiplayer_peer.close()
-	_host_svc.multiplayer.multiplayer_peer = null
+	_host_svc._relay.close()
 	check_true(
 		_pump_until(func() -> bool: return _client_stub.errors.size() == 1),
 		"client saw the host loss"
@@ -368,7 +364,85 @@ func test_client_loses_host_mid_match() -> void:
 	if _client_stub.errors.size() == 1:
 		check(String(_client_stub.errors[0]).contains("HOST DISCONNECTED"), "error names the host")
 	check_eq(_client_stub.leaves, 1, "client host hook observed the teardown")
-	check_eq(_client_svc.state, ServiceScript.State.OFFLINE, "client session closed after host loss")
+	check_eq(_client_svc.state, ServiceScript.State.READY, "client session closed after host loss")
+
+
+func test_unknown_room_code_is_actionable() -> void:
+	_reset_session()
+
+	check_true(_client_svc.ensure_ready(), "client READY")
+	_client_svc.join_lobby("ZZZZZZZ")
+	check_eq(_client_svc.state, ServiceScript.State.ERROR, "unknown code ends in ERROR")
+	check_true(
+		String(_client_svc.status_text).contains("Room not found"),
+		"unknown code surfaces an actionable status"
+	)
+	# ERROR is retryable: the same service can still join a real room.
+	check_true(_host_svc.ensure_ready(), "host READY")
+	check_true(_host_svc.create_lobby(), "room created")
+	_client_svc.join_lobby(_host_svc.session_code())
+	check_eq(_client_svc.state, ServiceScript.State.CONNECTING, "retry from ERROR starts a fresh join")
+	check_true(_pump_until(func() -> bool: return _in_lobby(_client_svc)), "client joined on retry")
+
+
+func test_room_capacity_is_enforced() -> void:
+	_reset_session()
+
+	check_true(_host_svc.ensure_ready(), "host READY")
+	check_true(_host_svc.create_lobby(), "room created")
+	var code: String = _host_svc.session_code()
+	for i in 3:
+		var svc: Node = _make_client_service("CapClient%d" % i)
+		svc.use_memory_relay(_hub)
+		check_true(svc.ensure_ready(), "extra client %d READY" % i)
+		svc.join_lobby(code)
+		var expected: int = 2 + i
+		check_eq(svc.state, ServiceScript.State.CONNECTING, "client %d joined the room" % i)
+		check_eq(svc.local_peer_id(), expected, "relay peer ids run 2..4")
+		var roster_size: int = 2 + i
+		check_true(
+			_pump_until(func() -> bool: return _host_svc.roster.size() == roster_size),
+			"host rostered client %d" % i
+		)
+	check_eq(_host_svc.roster.size(), 4, "room at capacity (host + 3 clients)")
+
+	# The relay refuses a fifth member; the service surfaces it.
+	var overflow: Node = _make_client_service("CapOverflow")
+	overflow.use_memory_relay(_hub)
+	check_true(overflow.ensure_ready(), "overflow client READY")
+	overflow.join_lobby(code)
+	check_eq(overflow.state, ServiceScript.State.ERROR, "overflow join rejected")
+	check_true(String(overflow.status_text).contains("full"), "actionable full-room status")
+	check_eq(_host_svc.roster.size(), 4, "roster never exceeds four players")
+
+
+func test_sender_identity_comes_from_the_relay() -> void:
+	## A rogue connection identifies itself only by joining; the payload
+	## carries no identity, so roster identity must come from the relay's
+	## stamped sender id. A forged sender header inside the payload merely
+	## corrupts the envelope and is ignored.
+	_reset_session()
+
+	check_true(_host_svc.ensure_ready(), "host READY")
+	check_true(_host_svc.create_lobby(), "room created")
+	var code: String = _host_svc.session_code()
+
+	var rogue: RelayMemoryConnection = RelayMemoryConnection.new(_hub)
+	check_true(rogue.join_room("memory://local", code), "rogue joined the room")
+	check_eq(rogue.peer_id, 2, "relay assigned the rogue peer 2")
+	rogue.send(NetScript.encode(NetScript.MSG_CLIENT_HELLO, 1, {"name": "Rogue"}))
+	check_true(_pump_until(func() -> bool: return _host_svc.roster.size() == 2), "host rosters the rogue")
+	if _host_svc.roster.size() == 2:
+		check_eq(int(_host_svc.roster[1]["peer_id"]), 2, "roster id is the relay stamp, not payload content")
+
+	# Forged sender bytes (a fake "peer 1" header) survive only as
+	# payload garbage: the envelope no longer decodes, so the host
+	# ignores the frame entirely.
+	rogue.send(PackedByteArray([1, 0, 0, 0]) + NetScript.encode(NetScript.MSG_CLIENT_HELLO, 1, {"name": "Ghost"}))
+	_pump(10)
+	check_eq(_host_svc.roster.size(), 2, "forged-header frame ignored")
+	check_eq(String(_host_svc.roster[1]["name"]), "Rogue", "roster untouched by the forged frame")
+	rogue.close()
 
 
 func _tick_host(steps: int) -> void:
