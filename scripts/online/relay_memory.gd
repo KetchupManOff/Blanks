@@ -7,6 +7,11 @@ extends RefCounted
 ## clients), member notifications, host-loss room teardown, and frame
 ## size bounds. Rate/heartbeat limits are transport-level and are
 ## covered by the relay's own Node test suite, not simulated here.
+##
+## `hold_delivery` (test-only) queues forwarded frames instead of
+## delivering them; `flush_held_frames()` releases every held frame in
+## original send order so tests can batch or delay traffic deliberately.
+## Normal semantics resume the moment delivery is unheld.
 
 
 const MAX_ROOM_PEERS: int = 4
@@ -17,6 +22,9 @@ const MAX_FRAME_BYTES: int = 65536
 const RelayContract = preload("res://scripts/online/relay_connection.gd")
 
 var rooms: Dictionary = {}  # code -> Room
+# Test-only deferred delivery: routed frames queue here while held.
+var hold_delivery: bool = false
+var _held_frames: Array = []  # {"room", "target", "sender", "data"}
 
 
 class Room:
@@ -92,12 +100,37 @@ func route_binary(sock: Sock, payload: PackedByteArray) -> String:
 		for id in sock.room.peers:
 			var target: Sock = sock.room.peers[id]
 			if not target.closed:
-				target.inbox.append({"sender": 1, "data": payload})
+				_offer(sock.room, target, 1, payload)
 	else:
 		var host: Sock = sock.room.host
 		if host != null and not host.closed:
-			host.inbox.append({"sender": sock.peer_id, "data": payload})
+			_offer(sock.room, host, sock.peer_id, payload)
 	return ""
+
+
+func _offer(room: Room, target: Sock, sender: int, payload: PackedByteArray) -> void:
+	## Deliver one frame into the receiver's inbox, or queue it while the
+	## test holds delivery.
+	if hold_delivery:
+		_held_frames.append({"room": room, "target": target, "sender": sender, "data": payload})
+		return
+	target.inbox.append({"sender": sender, "data": payload})
+
+
+func flush_held_frames() -> int:
+	## Test-only: release every held frame in original send order. Returns
+	## the number of frames released. Members that left their room since
+	## the frame was routed are skipped (closed sockets never deliver).
+	var held := _held_frames
+	_held_frames = []
+	var released: int = 0
+	for frame in held:
+		var target: Sock = frame["target"]
+		if target.closed or target.room == null:
+			continue
+		target.inbox.append({"sender": frame["sender"], "data": frame["data"]})
+		released += 1
+	return released
 
 
 func close_room_by_host(sock: Sock) -> void:

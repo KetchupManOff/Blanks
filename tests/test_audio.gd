@@ -111,7 +111,7 @@ func _make_host() -> Node:
 		# object per call, so swapping the fresh one in and re-applying
 		# is enough to isolate every test.
 		host._apply_display_settings()
-		DefaultBindings.apply_keyboard_profile(host.settings.keyboard_bindings)
+		DefaultBindings.apply_keyboard_profile(host.settings.active_keyboard_bindings())
 	# Isolate the library from repo assets and the user's music folder so
 	# library-dependent assertions stay deterministic. The normalization
 	# cache is redirected the same way so analysis never reads or writes
@@ -784,21 +784,92 @@ func test_host_coop_hard_drop_events_dedupe() -> void:
 	check_eq(_request_count(_host._audio, "line_clear"), 0, "no accidental clear sounds on an empty board")
 
 
+func test_replicated_snapshot_lock_edges_fire_once() -> void:
+	## A snapshot-rebuilt twin lock event is identified by the host's
+	## revision, not the local object: applying the identical snapshot
+	## repeatedly never replays a sound, only a revision advance (a new
+	## host event) emits exactly one additional edge, and a hard-drop
+	## snapshot lock stays silent after its optimistic drop sound.
+	_fresh_host()
+	_start_host_coop(2, ModeRules.Mode.MARATHON)
+	# Build real host-side lock events the way the authoritative run would.
+	_host.coop.hard_drop(0)
+	var snap: Dictionary = _host.coop.to_snapshot()
+	_host.coop.hard_drop(1)
+	var advanced: Dictionary = _host.coop.to_snapshot()
+	# Identical snapshot re-applied per frame: the edge fires once (silently
+	# - it is a hard-drop lock), never a replay.
+	for i in 5:
+		_host.coop.apply_snapshot(snap)
+		_host._process(0.0)
+	check_eq(_request_count(_host._audio, "lock"), 0, "identical snapshots never replay the lock sound")
+	check_eq(_request_count(_host._audio, "line_clear"), 0, "identical snapshots never replay clear sounds")
+	check_eq(_request_count(_host._audio, "tspin"), 0, "identical snapshots never replay t-spin sounds")
+	# A newer host lock (advanced revision) also stays silent: its drop
+	# sound already played optimistically on the client.
+	_host.coop.apply_snapshot(advanced)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "lock"), 0, "hard-drop snapshot locks stay suppressed")
+	# Advancing ONLY the revision with a natural (lock-delay) lock emits
+	# exactly one plain lock sound - and never a second.
+	var natural: Dictionary = advanced.duplicate(true)
+	var players: Array = natural["players"]
+	var event_snap: Dictionary = players[1]["event"]
+	event_snap["rev"] = int(event_snap["rev"]) + 1
+	event_snap["hard_drop"] = false
+	_host.coop.apply_snapshot(natural)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "lock"), 1, "advancing only the revision emits exactly one lock sound")
+	_host.coop.apply_snapshot(natural)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "lock"), 1, "the same revision never sounds twice")
+
+
+func test_replicated_level_and_end_edges_fire_once() -> void:
+	## Snapshot-driven level and end edges are tracked through the twin
+	## state: applying the same snapshot repeatedly never re-fires.
+	_fresh_host()
+	_start_host_coop(2, ModeRules.Mode.MARATHON)
+	var snap: Dictionary = _host.coop.to_snapshot()
+	snap = snap.duplicate(true)
+	snap["level"] = 3
+	_host.coop.apply_snapshot(snap)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "level_up"), 1, "level rise from a snapshot sounds once")
+	for i in 4:
+		_host.coop.apply_snapshot(snap)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "level_up"), 1, "identical snapshots never replay the level sound")
+	var finished: Dictionary = snap.duplicate(true)
+	finished["phase"] = CoopGame.Phase.FINISHED
+	_host.coop.apply_snapshot(finished)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "finish"), 1, "phase end from a snapshot sounds once")
+	_host.coop.apply_snapshot(finished)
+	_host._process(0.0)
+	check_eq(_request_count(_host._audio, "finish"), 1, "identical snapshots never replay the finish sound")
+
+
 # ------------------------------------------------------ host wiring: menus
 
 func test_host_menu_navigation_sfx() -> void:
 	_fresh_host()
 	_host._menu._move(1)
 	check_eq(_request_count(_host._audio, "menu_move"), 1, "menu movement requests menu move sound")
+	_host._menu._move(-1)
+	check_eq(_request_count(_host._audio, "menu_move"), 2, "menu movement keeps requesting the move sound")
 	_host._menu._activate()
 	check_eq(_request_count(_host._audio, "menu_confirm"), 1, "menu accept requests confirm sound")
+	_host._menu._move(1)
+	_host._menu._activate()
+	check_eq(_request_count(_host._audio, "menu_confirm"), 2, "solo mode accept requests confirm sound")
 	check_true(_host._profile_screen.is_open(), "menu activation opens the profile picker for the selected mode")
 	_host.cmd_solo_profile_selected(_host.settings.active_profile_id, ModeRules.Mode.SPRINT)
 	check_eq(_host.state, _host.HostState.PLAYING, "picking a profile starts the selected mode")
 
 	_host.action_pause()
 	_host._pause_menu._move(1)
-	check_eq(_request_count(_host._audio, "menu_move"), 2, "pause menu movement sounds")
+	check_eq(_request_count(_host._audio, "menu_move"), 4, "pause menu movement sounds")
 
 
 func test_host_coop_setup_menu_sfx() -> void:

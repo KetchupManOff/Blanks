@@ -34,6 +34,7 @@ const NetScript = preload("res://scripts/online/online_net.gd")
 const RelayContract = preload("res://scripts/online/relay_connection.gd")
 const RelayWebSocket = preload("res://scripts/online/relay_connection_websocket.gd")
 const RelayMemory = preload("res://scripts/online/relay_connection_memory.gd")
+const ModeRules = preload("res://scripts/core/mode_rules.gd")
 
 signal status_changed(text: String)
 signal state_changed()
@@ -55,6 +56,9 @@ enum State {
 # before any match traffic flows (envelope version + match config).
 const PROTOCOL_VERSION: int = 1
 const MAX_PLAYERS: int = 4
+# Display names are protocol-safe one-line strings: bounded, control-free,
+# non-empty (see normalize_display_name).
+const MAX_NAME_LENGTH: int = 16
 
 # Product relay endpoint - one non-secret setting, no credentials: the
 # project setting is the release default (set it before exporting; it
@@ -86,6 +90,8 @@ var display_name: String = ""
 # Current room bookkeeping.
 var room_code: String = ""
 var lobby_mode: int = 0  # ModeRules.Mode.*
+# Host-only Versus garbage switch, carried into the match configuration.
+var lobby_garbage: bool = false
 var lobby_phase: String = "lobby"  # "lobby" | "match"
 var is_host: bool = false
 
@@ -107,6 +113,15 @@ var _snap_id: int = 0
 var _snapshot_acc: float = 0.0
 var _rx_snap_id: int = -1
 var _rx_parts: Dictionary = {}  # part -> PackedByteArray for _rx_snap_id
+var _rx_snap_rel: bool = false  # structural flag of the reassembling frame
+# Newest fully decoded snapshot id/tick already delivered to the GameHost
+# twin; guards stale/duplicate frames from overwriting current state.
+var _applied_snap_id: int = -1
+var _applied_tick: int = -1
+# Latest-only coalescing: periodic snapshots complete inside one transport
+# drain but apply once per client frame; structural frames apply at once.
+var _pending_snapshot: Dictionary = {}
+var _pending_id: int = -1
 
 var _net: Node = null
 var _relay: RelayContract = null
@@ -158,7 +173,7 @@ func local_peer_id() -> int:
 	return 0
 
 
-## What the host shares so others can join: the opaque room code.
+## Canonical room code assigned to this peer's current relay room.
 func session_code() -> String:
 	return room_code
 
@@ -212,11 +227,46 @@ func ensure_ready() -> bool:
 
 
 func _local_display_name() -> String:
+	## Local player label: the active profile's name (never sent as a raw
+	## profile id - ids are local-only), normalized for the wire.
+	var fallback := "Player" + String.num(OS.get_process_id() % 1000)
 	if game_host != null and game_host.has_method("active_profile_name"):
-		var profile_name: String = game_host.active_profile_name()
-		if not profile_name.is_empty():
-			return profile_name
-	return "Player" + String.num(OS.get_process_id() % 1000)
+		return normalize_display_name(game_host.active_profile_name(), fallback)
+	return fallback
+
+
+static func normalize_display_name(raw, fallback: String) -> String:
+	## Protocol-safe display name: one line, no control characters,
+	## whitespace runs collapsed to single spaces, bounded length, never
+	## empty. Used for local and every received name so the roster and the
+	## match configuration can never carry hostile text.
+	var text := ""
+	if raw is String:
+		text = raw
+	elif raw is float or raw is int:
+		text = str(raw)
+	var cleaned := ""
+	var pending_space := false
+	for ch in text:
+		if ch.is_empty():
+			continue
+		var code := ch.unicode_at(0)
+		var is_control: bool = code < 0x20 or code == 0x7F or (code >= 0x80 and code <= 0x9F)
+		var is_space: bool = code == 0x20 or code == 0x09
+		if is_control or is_space:
+			# Collapse every whitespace/control run into one space.
+			pending_space = cleaned.length() > 0
+			continue
+		if pending_space:
+			cleaned += " "
+			pending_space = false
+		cleaned += ch
+	cleaned = cleaned.strip_edges(true, true)
+	if cleaned.length() > MAX_NAME_LENGTH:
+		cleaned = cleaned.substr(0, MAX_NAME_LENGTH).strip_edges(true, true)
+	if cleaned.is_empty():
+		return fallback
+	return cleaned
 
 
 # ------------------------------------------------------------------- lobby
@@ -232,6 +282,13 @@ func create_lobby() -> bool:
 	roster = []
 	_intent_guards = {}
 	room_code = ""
+	# Fresh identity at every room creation: the active profile may have
+	# changed since ensure_ready cached the name (roster identity is
+	# fixed for a running room, renames affect the next create/join).
+	display_name = _local_display_name()
+	# Versus lobbies start with garbage on (the classic default); the host
+	# toggles it per room and it persists across rounds of the same room.
+	lobby_garbage = true
 	_flow_timer = 0.0
 	_set_state(State.CREATING_LOBBY)
 	_status("Creating room...")
@@ -305,12 +362,28 @@ func set_mode(mode: int) -> void:
 	lobby_changed.emit()
 
 
+## Host-only: toggle the Versus garbage setting; broadcast to the room.
+func set_garbage(on: bool) -> void:
+	if not is_host or state != State.LOBBY:
+		return
+	lobby_garbage = on
+	_broadcast_lobby_state()
+	lobby_changed.emit()
+
+
 ## Host: start the round for the current roster. Requires every client
-## ready.
+## ready. Competitive modes additionally validate their match shape
+## (Versus needs 2-4 peers; Tower never garbage) before broadcasting.
 func start_round() -> bool:
 	if not is_host or state != State.LOBBY:
 		return false
 	if roster.is_empty():
+		return false
+	if ModeRules.is_competitive(lobby_mode) and not ModeRules.valid_competitive_match(
+		lobby_mode, roster.size(), lobby_garbage and lobby_mode == ModeRules.Mode.CLASSIC_VERSUS
+	):
+		_status("Classic Versus and Tower need 2-4 players in the room")
+		lobby_changed.emit()
 		return false
 	for entry in roster:
 		if not bool(entry["ready"]):
@@ -322,8 +395,16 @@ func start_round() -> bool:
 		"player_count": roster.size(),
 		"roster": _roster_wire(),
 	}
+	if lobby_mode == ModeRules.Mode.TOWER:
+		# Tower never runs with garbage; the field stays absent for the
+		# mode but the config stays explicit for validation.
+		config["garbage"] = false
+	elif lobby_mode == ModeRules.Mode.CLASSIC_VERSUS:
+		config["garbage"] = lobby_garbage
 	lobby_phase = "match"
 	_intent_guards = {}
+	_reset_receive_stream()
+	_snapshot_acc = 0.0
 	for entry in roster:
 		var peer_id := int(entry["peer_id"])
 		if peer_id != 1:
@@ -380,10 +461,11 @@ func host_match_frame(delta: float, structural: bool) -> void:
 
 ## Host: capture the authoritative snapshot and broadcast it in
 ## bounded chunks. The `reliable` label distinguishes structural frames
-## (sent immediately) from periodic ones (cadenced by host_match_frame);
-## WebSocket delivery itself is ordered and reliable, so both ride the
-## same channel and a slow client supersedes stale periodic frames
-## during reassembly rather than accumulating them.
+## (sent immediately, applied promptly by clients) from periodic ones
+## (cadenced by host_match_frame, coalesced client-side to the newest
+## complete state); WebSocket delivery itself is ordered and reliable,
+## so both ride the same channel and a slow client supersedes stale
+## periodic frames during reassembly rather than accumulating them.
 func send_snapshot(reliable: bool) -> void:
 	if state != State.IN_MATCH or not is_host or game_host == null:
 		return
@@ -397,8 +479,36 @@ func send_snapshot(reliable: bool) -> void:
 			"id": _snap_id,
 			"part": i,
 			"count": chunks.size(),
+			"rel": reliable,
 			"bytes": chunks[i],
 		})
+
+
+## Host: replicate an authoritative pause toggle to every peer immediately
+## (host-only, in-match only); the host's structural snapshot carries the
+## same revision so world state and pause state arrive in order.
+func broadcast_pause_state(paused: bool, rev: int) -> void:
+	if state != State.IN_MATCH or not is_host:
+		return
+	_send_envelope(_net.MSG_PAUSE_STATE, {"paused": paused, "rev": rev})
+
+
+## Test/inspection helper: newest snapshot id the client has delivered.
+func applied_snapshot_id() -> int:
+	return _applied_snap_id
+
+
+## Drop every inbound snapshot stream bookkeeping entry (match start,
+## lobby return, leave): parts from a previous round can never leak into
+## the next one.
+func _reset_receive_stream() -> void:
+	_rx_snap_id = -1
+	_rx_parts = {}
+	_rx_snap_rel = false
+	_applied_snap_id = -1
+	_applied_tick = -1
+	_pending_snapshot = {}
+	_pending_id = -1
 
 
 func _chunk(data: PackedByteArray) -> Array:
@@ -421,6 +531,7 @@ func host_round_finished(result: Dictionary) -> void:
 	send_snapshot(true)
 	_send_envelope(_net.MSG_ROUND_FINISHED, result)
 	lobby_phase = "lobby"
+	_reset_receive_stream()
 	# Ready flags reset for the next round; membership and transport stay.
 	for entry in roster:
 		entry["ready"] = int(entry["peer_id"]) == 1
@@ -434,6 +545,14 @@ func host_return_to_lobby() -> void:
 	if not is_host:
 		return
 	_send_envelope(_net.MSG_RETURN_TO_LOBBY, {})
+	_online_return_to_lobby()
+
+
+## Client: leave the result overlay for the persistent lobby locally. The
+## room is already in its lobby phase; no authority-changing message is sent.
+func client_return_to_lobby() -> void:
+	if is_host or state != State.LOBBY or lobby_phase != "lobby":
+		return
 	_online_return_to_lobby()
 
 
@@ -453,10 +572,10 @@ func leave_session() -> void:
 	roster = []
 	_intent_guards = {}
 	_intent_seq = 0
-	_rx_parts = {}
-	_rx_snap_id = -1
+	_reset_receive_stream()
 	own_slot = -1
 	is_host = false
+	lobby_garbage = false
 	lobby_phase = "lobby"
 	_flow_timer = 0.0
 	_handshake_timer = 0.0
@@ -539,7 +658,10 @@ func _on_relay_room_ready(code: String, _peer_id: int) -> void:
 		lobby_changed.emit()
 	else:
 		# Client: introduce ourselves; the host rosters us and its next
-		# lobby_state moves this state machine to LOBBY.
+		# lobby_state moves this state machine to LOBBY. The name is
+		# refreshed now (the active profile may have changed since the
+		# READY cache) and normalized for the wire.
+		display_name = _local_display_name()
 		_set_state(State.CONNECTING)
 		_status("Connecting to host...")
 		_handshake_timer = 0.0
@@ -637,11 +759,7 @@ func _net_client_hello(sender: int, data) -> void:
 	for entry in roster:
 		if int(entry["peer_id"]) == sender:
 			return  # duplicate hello: idempotent
-	var name := "P%d" % sender
-	if data is Dictionary:
-		name = String(data.get("name", name)).strip_edges().substr(0, 16)
-	if name.is_empty():
-		name = "P%d" % sender
+	var name := normalize_display_name(data.get("name", ""), "P%d" % sender)
 	_roster_add(sender, name, false)
 	_intent_guards[sender] = InputIntent.make_guard()
 	_broadcast_lobby_state()
@@ -654,6 +772,7 @@ func _net_lobby_state(sender: int, wire) -> void:
 	if wire is not Dictionary:
 		return
 	lobby_mode = int(wire.get("mode", lobby_mode))
+	lobby_garbage = bool(wire.get("garbage", false))
 	lobby_phase = String(wire.get("phase", lobby_phase))
 	var mine := local_peer_id()
 	var new_roster: Array = []
@@ -662,15 +781,18 @@ func _net_lobby_state(sender: int, wire) -> void:
 		for entry in entries:
 			if entry is Dictionary:
 				var peer_id := int(entry.get("peer_id", 0))
+				var slot := int(entry.get("slot", -1))
 				new_roster.append({
 					"peer_id": peer_id,
-					"name": String(entry.get("name", "")),
+					# Host roster names are already normalized; the wire
+					# copy is re-normalized defensively anyway.
+					"name": normalize_display_name(entry.get("name", ""), "P%d" % slot),
 					"ready": bool(entry.get("ready", false)),
-					"slot": int(entry.get("slot", -1)),
+					"slot": slot,
 					"connected": true,
 				})
 				if peer_id == mine:
-					own_slot = int(entry.get("slot", -1))
+					own_slot = slot
 	roster = new_roster
 	if state == State.CONNECTING and own_slot >= 0:
 		_set_state(State.LOBBY)
@@ -688,8 +810,23 @@ func _net_match_started(sender: int, config) -> void:
 		# makes impossible): refuse the match instead of desyncing.
 		push_warning("online: match_started before a roster assignment; ignoring")
 		return
+	var mode := int(config.get("mode", -1))
+	var player_count := clampi(int(config.get("player_count", 1)), 0, MAX_PLAYERS)
+	var garbage := bool(config.get("garbage", false))
+	if ModeRules.is_competitive(mode) and not ModeRules.valid_competitive_match(mode, player_count, garbage):
+		# A malformed or stale competitive configuration (wrong roster
+		# size, garbage on Tower) fails closed into the error path instead
+		# of building a match this client cannot validate.
+		push_warning("online: rejecting malformed competitive match config")
+		game_host.online_session_error("MATCH CONFIGURATION REJECTED - return to the lobby")
+		leave_session()
+		return
+	# Intent validation is round-scoped on the host, so the client's
+	# monotonically increasing sequence must restart at the same boundary.
+	_intent_seq = 0
 	lobby_phase = "match"
 	_set_state(State.IN_MATCH)
+	_reset_receive_stream()
 	_status("Match starting")
 	if game_host != null and game_host.has_method("online_begin_client_match"):
 		config["own_slot"] = own_slot
@@ -700,8 +837,14 @@ func _net_round_finished(sender: int, result) -> void:
 	if is_host or sender != 1:
 		return  # host-only broadcast
 	lobby_phase = "lobby"
+	_reset_receive_stream()
+	for entry in roster:
+		entry["ready"] = int(entry["peer_id"]) == 1
+	_set_state(State.LOBBY)
+	_status("Round over - back in lobby")
 	if result is Dictionary and game_host != null and game_host.has_method("online_show_results"):
 		game_host.online_show_results(result)
+	lobby_changed.emit()
 
 
 func _net_return_to_lobby(sender: int) -> void:
@@ -712,6 +855,7 @@ func _net_return_to_lobby(sender: int) -> void:
 
 func _online_return_to_lobby() -> void:
 	lobby_phase = "lobby"
+	_reset_receive_stream()
 	if game_host != null and game_host.has_method("online_return_to_lobby"):
 		game_host.online_return_to_lobby()
 	if state == State.IN_MATCH:
@@ -744,15 +888,22 @@ func _net_submit_intent(sender: int, data) -> void:
 		Time.get_ticks_msec()
 	)
 	if verdict != InputIntent.Verdict.OK:
-		if verdict in [InputIntent.Verdict.WRONG_SLOT, InputIntent.Verdict.NOT_ROSTERED]:
+		if verdict in [InputIntent.Verdict.WRONG_SLOT, InputIntent.Verdict.NOT_ROSTERED, InputIntent.Verdict.GAP_SEQ]:
 			push_warning("online: rejected intent from peer %d (%s)" % [sender, InputIntent.verdict_text(verdict)])
 		return
 	game_host.online_apply_intent(slot, action, arg)
 
 
 func _net_snapshot(sender: int, data) -> void:
+	## Client: consume one snapshot chunk. Delivery is reliable+ordered, but
+	## parts from an interrupted older frame may still arrive after a
+	## reset/restart: parts of older frames are dropped. Structural frames
+	## (`rel`) apply as soon as they complete; periodic frames coalesce -
+	## only the newest complete state survives until the next client frame.
 	if is_host or sender != 1 or game_host == null:
 		return  # host-only broadcast
+	if state != State.IN_MATCH:
+		return
 	if data is not Dictionary:
 		return
 	var bytes = data.get("bytes")
@@ -766,6 +917,7 @@ func _net_snapshot(sender: int, data) -> void:
 	if snap_id != _rx_snap_id:
 		_rx_snap_id = snap_id
 		_rx_parts = {}
+		_rx_snap_rel = bool(data.get("rel", false))
 	_rx_parts[part] = bytes
 	if _rx_parts.size() < count:
 		return  # frame incomplete; a newer snapshot id supersedes losses
@@ -777,8 +929,66 @@ func _net_snapshot(sender: int, data) -> void:
 		data_bytes.append_array(piece)
 	_rx_parts = {}
 	var snapshot = bytes_to_var(data_bytes)
+	if not (snapshot is Dictionary):
+		return
+	if _rx_snap_rel:
+		# Structural frames (pause, phase transitions, geometry) apply
+		# promptly: coalescing them could strand a whole round of state.
+		_deliver_snapshot(snapshot, snap_id)
+	else:
+		# Latest-only coalescing: several periodic frames can complete
+		# inside one transport drain; only the newest survives to the
+		# next client frame.
+		_pending_snapshot = snapshot
+		_pending_id = snap_id
+
+
+func _deliver_snapshot(snapshot: Dictionary, snap_id: int) -> void:
+	## Deliver one complete snapshot to the GameHost twin. Stale or
+	## duplicate frames (older id or older tick than anything already
+	## applied) cannot overwrite current state.
+	var tick := int(snapshot.get("tick", -1))
+	if snap_id < _applied_snap_id:
+		return  # stale frame id
+	if snap_id == _applied_snap_id:
+		return  # duplicate complete frame
+	if tick < _applied_tick:
+		return  # stale world state
+	_applied_snap_id = snap_id
+	_applied_tick = tick
 	if game_host.has_method("online_apply_snapshot"):
 		game_host.online_apply_snapshot(snapshot)
+
+
+func _drain_pending_snapshot() -> void:
+	## Apply the coalesced newest periodic snapshot, if any, once per
+	## client frame.
+	if _pending_id < 0 or state != State.IN_MATCH or is_host:
+		return
+	var snapshot := _pending_snapshot
+	var snap_id := _pending_id
+	_pending_snapshot = {}
+	_pending_id = -1
+	_deliver_snapshot(snapshot, snap_id)
+
+
+func _net_pause_state(sender: int, data) -> void:
+	## Client: host pause/resume replication. Host-only broadcast,
+	## in-match only; the GameHost hook applies it idempotently by
+	## revision so a stale snapshot never flips a newer pause.
+	if is_host or sender != 1:
+		return  # host-only broadcast
+	if state != State.IN_MATCH:
+		return
+	if not (data is Dictionary):
+		return
+	var paused = data.get("paused")
+	var rev = data.get("rev")
+	if typeof(paused) != TYPE_BOOL or typeof(rev) != TYPE_INT:
+		return
+	if game_host == null or not game_host.has_method("online_set_paused"):
+		return
+	game_host.online_set_paused(paused, rev)
 
 
 # ------------------------------------------------------------------ helpers
@@ -798,6 +1008,7 @@ func _broadcast_lobby_state() -> void:
 		return
 	_send_envelope(_net.MSG_LOBBY_STATE, {
 		"mode": lobby_mode,
+		"garbage": lobby_garbage,
 		"phase": lobby_phase,
 		"roster": _roster_wire(),
 	})
@@ -841,6 +1052,9 @@ func _process(delta: float) -> void:
 	# loop with current state.
 	if _relay != null:
 		_relay.poll(delta)
+	# Latest-only snapshot application: one coalesced periodic frame per
+	# client tick, after the transport drain settled.
+	_drain_pending_snapshot()
 	# Bounded waits: a lost relay response can never strand the UI.
 	match state:
 		State.CREATING_LOBBY, State.JOINING:

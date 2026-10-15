@@ -1,5 +1,5 @@
 ﻿extends "res://tests/test_lib.gd"
-## Coop lobby and run flow smoke tests: lobby open/close, the three-second
+## Coop lobby and run flow smoke tests: lobby open/close, the two-second
 ## pad claim with device exclusions, profile joins (pad and keyboard),
 ## duplicate rejection, slot removal, mode/start gating, coop runs carrying
 ## ordered profile/device assignments, pause/restart/results, team result
@@ -9,6 +9,7 @@ const CoreGame = preload("res://scripts/core/game.gd")
 const CoopGame = preload("res://scripts/core/coop_game.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 const SettingsClass = preload("res://scripts/persistence/settings.gd")
+const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 
 var _host: Node = null
 var _fake_pressed: Dictionary = {}
@@ -109,6 +110,7 @@ func test_lobby_defaults_to_four_free_slots() -> void:
 func test_lobby_start_blocked_without_profiles() -> void:
 	_to_menu()
 	_use_fake_claim()
+	_lobby().game_mode = ModeRules.Mode.MARATHON
 	_lobby().open()
 	# START cannot launch without at least one joined profile.
 	_lobby()._selected = _lobby().ROW_START
@@ -122,16 +124,16 @@ func test_lobby_start_blocked_without_profiles() -> void:
 	_lobby().close()
 
 
-func test_lobby_claim_requires_three_second_hold() -> void:
+func test_lobby_claim_requires_two_second_hold() -> void:
 	_to_menu()
 	_use_fake_claim()
 	_lobby().open()
 	_press(5, [0])
-	_lobby()._claim.tick(2.5)
-	check_eq(_lobby().slots[0], {}, "2.5s of hold claims nothing")
+	_lobby()._claim.tick(1.5)
+	check_eq(_lobby().slots[0], {}, "1.5s of hold claims nothing")
 	_lobby()._claim.tick(0.5)
 	var slot: Dictionary = _lobby().slots[0]
-	check_false(slot.is_empty(), "3s of hold claims the first free slot")
+	check_false(slot.is_empty(), "2s of hold claims the first free slot")
 	check_eq(slot.get("device", -2), 5, "claimed device recorded")
 	check_eq(slot.get("profile_id", "pending"), "", "profile pick pending until release")
 	check_eq(_lobby().joined_count(), 0, "pending claim is not a joined player yet")
@@ -151,11 +153,11 @@ func test_lobby_claim_release_resets_progress() -> void:
 	_lobby()._claim.tick(1.0)
 	_press(5, [])
 	_lobby()._claim.tick(0.5)
-	check_eq(_lobby().slots[0], {}, "release before 3s claims nothing")
+	check_eq(_lobby().slots[0], {}, "release before 2s claims nothing")
 	_lobby()._claim.tick(2.5)
 	check_eq(_lobby().slots[0], {}, "hold restarts from zero after a release")
 	_press(5, [0])
-	_lobby()._claim.tick(3.0)
+	_lobby()._claim.tick(2.0)
 	check_false(_lobby().slots[0].is_empty(), "a fresh full hold claims the pad")
 	_lobby().close()
 
@@ -166,7 +168,7 @@ func test_lobby_claim_excludes_assigned_devices() -> void:
 	_lobby().open()
 	# Slot 0 joins with pad 5 through the claim flow.
 	_press(5, [1])
-	_lobby()._claim.tick(3.0)
+	_lobby()._claim.tick(2.0)
 	_press(5, [])
 	_lobby()._claim.tick(0.1)
 	var id: String = _host.settings.active_profile_id
@@ -175,10 +177,10 @@ func test_lobby_claim_excludes_assigned_devices() -> void:
 	check_true(_lobby()._claim.active, "claim resumes after the join")
 	# Pad 5 is excluded now; a second pad claims the next free slot.
 	_press(5, [1])
-	_lobby()._claim.tick(3.0)
+	_lobby()._claim.tick(2.0)
 	check_eq(_lobby().slots[1], {}, "an already-assigned pad cannot claim again")
 	_press(6, [2])
-	_lobby()._claim.tick(3.0)
+	_lobby()._claim.tick(2.0)
 	check_eq(_lobby().slots[1].get("device", -1), 6, "a free pad claims the second slot")
 	_lobby().close()
 
@@ -188,7 +190,7 @@ func test_lobby_join_completes_slot_with_profile() -> void:
 	_use_fake_claim()
 	_lobby().open()
 	_press(2, [3])
-	_lobby()._claim.tick(3.0)
+	_lobby()._claim.tick(2.0)
 	_press(2, [])
 	_lobby()._claim.tick(0.1)
 	var id: String = _host.settings.active_profile_id
@@ -259,18 +261,29 @@ func test_lobby_remove_joined_slot() -> void:
 
 func test_lobby_mode_toggles() -> void:
 	_to_menu()
+	_lobby().game_mode = ModeRules.Mode.MARATHON
 	_lobby().open()
 	check_eq(_lobby().game_mode, ModeRules.Mode.MARATHON, "marathon default")
 	_lobby()._selected = _lobby().ROW_MODE
 	_lobby()._adjust(1)
 	check_eq(_lobby().game_mode, ModeRules.Mode.SPRINT, "right toggles sprint")
-	_lobby()._activate()
-	check_eq(_lobby().game_mode, ModeRules.Mode.MARATHON, "activate toggles back")
+	_lobby()._adjust(-1)
+	check_eq(_lobby().game_mode, ModeRules.Mode.MARATHON, "left toggles back")
+	# The full cycle covers every lobby mode and wraps around.
+	for expected in [
+		ModeRules.Mode.SPRINT,
+		ModeRules.Mode.CLASSIC_VERSUS,
+		ModeRules.Mode.TOWER,
+		ModeRules.Mode.MARATHON,
+	]:
+		_lobby()._activate()
+		check_eq(_lobby().game_mode, expected, "activation cycles forward")
 	_lobby().close()
 
 
 func test_lobby_start_launches_with_assignments() -> void:
 	_to_menu()
+	_lobby().game_mode = ModeRules.Mode.MARATHON
 	_lobby().open()
 	var id_a: String = _host.settings.active_profile_id
 	var id_b: String = _host.settings.create_profile("LobbyStart")
@@ -335,6 +348,85 @@ func test_coop_devices_assigned_per_slot() -> void:
 	# Disconnected devices read as unpressed and never crash polling.
 	_host.input_process_once(0.1)
 	check_eq(_host.state, _host.HostState.PLAYING, "polling without connected pads is safe")
+
+
+func _press_input_key(code: int) -> void:
+	# Synthetic key state for the input controller's polling loop.
+	var ev := InputEventKey.new()
+	ev.physical_keycode = code
+	ev.pressed = true
+	Input.parse_input_event(ev)
+	Input.flush_buffered_events()
+
+
+func _release_input_key(code: int) -> void:
+	var ev := InputEventKey.new()
+	ev.physical_keycode = code
+	ev.pressed = false
+	Input.parse_input_event(ev)
+	Input.flush_buffered_events()
+
+
+func test_coop_keyboard_routing_follows_profile_bindings() -> void:
+	# Local coop polls each slot's own profile keyboard records directly:
+	# a key bound only in one profile drives only that slot, and the global
+	# InputMap (the active profile's mapping) is irrelevant for routing.
+	var ids := _start_coop(2, ModeRules.Mode.MARATHON)
+	var defaults := DefaultBindings.default_keyboard_profile()
+	var kb_a := defaults.duplicate(true)
+	kb_a["move_left"] = [DefaultBindings.key_record(KEY_F5)]
+	kb_a["hold"] = [DefaultBindings.key_record(KEY_F6)]
+	var kb_b := defaults.duplicate(true)
+	kb_b["move_left"] = [DefaultBindings.key_record(KEY_F7)]
+	kb_b["hold"] = [DefaultBindings.key_record(KEY_F8)]
+	check_true(_host.cmd_keyboard_bindings_captured(ids[0], kb_a), "profile A keyboard committed")
+	check_true(_host.cmd_keyboard_bindings_captured(ids[1], kb_b), "profile B keyboard committed")
+	var controller: Node = _host.input_controller()
+	check_eq(DefaultBindings.action_for_record(_host.input_coop_keyboard_bindings(0), DefaultBindings.key_record(KEY_F5)), "move_left", "slot 0 caches profile A keyboard")
+	check_eq(DefaultBindings.action_for_record(_host.input_coop_keyboard_bindings(1), DefaultBindings.key_record(KEY_F7)), "move_left", "slot 1 caches profile B keyboard")
+	# Held movement polls only through the owning profile's records.
+	var x_a: int = _host.coop.players[0].piece_x
+	var x_b: int = _host.coop.players[1].piece_x
+	_press_input_key(KEY_F7)
+	controller._process(0.0)
+	check_eq(_host.coop.players[1].piece_x, x_b - 1, "player B moved left through its own profile binding")
+	check_eq(_host.coop.players[0].piece_x, x_a, "player A untouched by B's key")
+	_release_input_key(KEY_F7)
+	controller._process(0.0)
+	check_eq(_host.coop.players[0].piece_x, x_a, "release does not disturb player A")
+	# Single-fire events route per profile too (raw record matching).
+	var ev := InputEventKey.new()
+	ev.physical_keycode = KEY_F8
+	ev.pressed = true
+	controller._coop_event(ev)
+	check_true(_host.coop.players[1].hold_used, "player B held through its own profile binding")
+	check_false(_host.coop.players[0].hold_used, "player A untouched by B's hold key")
+	# Pause stays a shared action: any slot's own pause mapping fires it.
+	var esc := InputEventKey.new()
+	esc.physical_keycode = KEY_ESCAPE
+	esc.pressed = true
+	controller._coop_event(esc)
+	check_eq(_host.state, _host.HostState.PAUSED, "pause fires from a slot's keyboard bindings")
+	_host.action_pause()
+	check_eq(_host.state, _host.HostState.PLAYING, "resume returns to play")
+
+
+func test_coop_shared_keyboard_conflict_warns() -> void:
+	_to_menu()
+	_host.cmd_open_coop_setup()
+	var id_a: String = _host.settings.create_profile("SameKeysA")
+	var id_b: String = _host.settings.create_profile("SameKeysB")
+	# Two profiles sharing one keyboard is a local configuration hazard:
+	# the lobby surfaces it instead of silently changing bindings.
+	_lobby().slots[0] = {"profile_id": id_a, "device": -1}
+	_lobby().slots[1] = {"profile_id": id_b, "device": -1}
+	_lobby()._refresh()
+	check_true(_lobby()._pads.text.contains("WARNING"), "shared keyboard warning surfaced")
+	check_true(_lobby()._pads.text.contains("P1 and P2"), "warning names both slots")
+	_lobby().slots[1] = {}
+	_lobby()._refresh()
+	check_false(_lobby()._pads.text.contains("WARNING"), "warning clears with the conflict")
+	_lobby().close()
 
 
 func test_coop_game_over_and_retry() -> void:
@@ -438,11 +530,11 @@ func test_solo_run_after_coop() -> void:
 	check_true(_host.core.elapsed > 0.0, "solo simulation advances")
 
 
-func test_main_menu_lists_coop() -> void:
+func test_main_menu_lists_local_multiplayer() -> void:
 	_to_menu()
 	var labels: Array = []
 	for item in _host._menu._items:
 		labels.append(item["label"])
-	check(labels.has("CO-OP"), "main menu has a coop entry")
-	check(labels.has("MARATHON"), "solo marathon still present")
-	check(labels.has("40-LINE SPRINT"), "solo sprint still present")
+	check(labels.has("LOCAL MULTIPLAYER"), "main menu has a local multiplayer entry")
+	check(labels.has("SOLO"), "solo category present")
+	check_false(labels.has("MARATHON"), "solo modes live behind the solo category")

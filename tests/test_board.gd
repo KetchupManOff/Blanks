@@ -134,3 +134,94 @@ func test_perfect_clear_helpers() -> void:
 	b.set_cell(4, 5, TetrominoData.EMPTY)
 	check_true(b.is_area_empty_of_blocks_outside_rows([21]), "PC check passes with only the clearing row filled")
 	check_false(b.is_completely_empty(), "clearing row itself still counts as occupied")
+
+
+# --------------------------------------------------------- dynamic geometry
+
+func test_prepend_rows_preserves_cells_and_floor() -> void:
+	var b := Board.new()
+	b.set_cell(4, 21, TetrominoData.Kind.T)
+	b.set_cell(0, 2, TetrominoData.Kind.I)
+	check_eq(b.locked_height(), 20, "height before growth spans to the visible top")
+	b.prepend_rows(10)
+	check_eq(b.HEIGHT, 32, "height grows by the prepended rows")
+	check_eq(b.get_cell(4, 31), TetrominoData.Kind.T, "floor content shifts down with the floor")
+	check_eq(b.get_cell(0, 12), TetrominoData.Kind.I, "former visible top row keeps its content")
+	check_eq(b.get_cell(0, 2), TetrominoData.EMPTY, "new rows at the top start empty")
+	check_eq(b.locked_height(), 20, "height is invariant under growth")
+	check_true(b.is_blocked(4, 31), "the shifted cell blocks at its new position")
+	check_true(b.is_blocked(4, 32), "the new floor still blocks below the content")
+
+
+func test_prepend_rows_repeated_and_clear_afterwards() -> void:
+	var b := Board.new()
+	for i in 3:
+		b.prepend_rows(10)
+	check_eq(b.HEIGHT, 52, "repeated expansion accumulates")
+	for x in 10:
+		b.set_cell(x, 51, TetrominoData.Kind.J)
+	b.clear_rows([51])
+	check_eq(b.get_cell(5, 51), TetrominoData.EMPTY, "rows clear at runtime height after growth")
+	check_true(b.is_completely_empty(), "board empty again")
+
+
+func test_insert_garbage_rows_shifts_stack_and_holes() -> void:
+	var b := Board.new()
+	b.set_cell(4, 21, TetrominoData.Kind.T)
+	b.insert_garbage_rows(2, [3, 7], 7)
+	check_eq(b.HEIGHT, 22, "garbage keeps the fixed height")
+	check_eq(b.get_cell(4, 21), 7, "the old bottom row is now garbage territory")
+	check_eq(b.get_cell(3, 21), TetrominoData.EMPTY, "hole_columns[0] opens the bottom row")
+	check_eq(b.get_cell(7, 20), TetrominoData.EMPTY, "hole_columns[1] opens the row above")
+	for x in 10:
+		if x != 3:
+			check_eq(b.get_cell(x, 21), 7, "garbage fills the row except the hole")
+		if x != 7:
+			check_eq(b.get_cell(x, 20), 7, "garbage fills the row except the hole (2)")
+	check_eq(b.get_cell(4, 19), TetrominoData.Kind.T, "the stack shifted up by the count")
+	check_eq(b.locked_height(), 3, "stack plus garbage spans three rows")
+
+
+func test_insert_garbage_discards_rows_pushed_off_the_top() -> void:
+	var b := Board.new()
+	b.set_cell(0, 3, TetrominoData.Kind.I)  # would land above the top after the shift
+	b.set_cell(0, 5, TetrominoData.Kind.J)
+	b.set_cell(0, 6, TetrominoData.Kind.L)
+	b.insert_garbage_rows(4, [1, 1, 1, 1], 7)
+	var survivors: int = 0
+	for y in b.HEIGHT:
+		for x in b.WIDTH:
+			if b.get_cell(x, y) == TetrominoData.Kind.I:
+				survivors += 1
+	check_eq(survivors, 0, "cells pushed above the top are discarded")
+	check_eq(b.get_cell(0, 1), TetrominoData.Kind.J, "hidden-row cell shifted up by the count")
+	check_eq(b.get_cell(0, 2), TetrominoData.Kind.L, "the next cell follows the same shift")
+	check_eq(b.get_cell(1, 21), TetrominoData.EMPTY, "bottom garbage row hole at the given column")
+	check_eq(b.get_cell(0, 21), 7, "garbage fills the rest of the row")
+
+
+func test_locked_height_metric() -> void:
+	var b := Board.new()
+	check_eq(b.locked_height(), 0, "empty board has zero height")
+	b.set_cell(9, 21, TetrominoData.Kind.O)
+	check_eq(b.locked_height(), 1, "single bottom-row block counts one row")
+	b.set_cell(0, 5, TetrominoData.Kind.L)
+	check_eq(b.locked_height(), 17, "height spans from the floor to the highest block")
+	b.clear_rows([21])
+	check_eq(b.locked_height(), 16, "clearing the bottom row lowers the height")
+
+
+func test_dynamic_snapshot_round_trip() -> void:
+	var b := Board.new()
+	b.set_cell(4, 21, TetrominoData.Kind.T)
+	b.prepend_rows(10)
+	var state: Dictionary = b.snapshot_state()
+	check_eq(int(state["h"]), 32, "snapshot carries the runtime height")
+	var twin := Board.new()
+	check_true(twin.restore_state(state), "twin accepts the larger geometry")
+	check_eq(twin.HEIGHT, 32, "twin height resized on restore")
+	check_eq(twin.get_cell(4, 31), TetrominoData.Kind.T, "cells restored at the shifted position")
+	check_false(twin.restore_state({"h": 22, "cells": PackedInt32Array()}), "wrong cell count rejected")
+	check_false(twin.restore_state({"h": 10, "cells": twin.snapshot_cells()}), "height below the default rejected")
+	check_false(twin.restore_state("nope"), "non-dictionary rejected")
+	check_eq(twin.HEIGHT, 32, "rejected restores leave the geometry untouched")

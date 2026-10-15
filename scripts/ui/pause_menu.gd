@@ -22,6 +22,16 @@ func show_pause() -> void:
 		"Simulation frozen",
 		items
 	)
+	# The subtitle carries the freeze note; the detail line must not show
+	# stale copy from whatever menu screen preceded the run.
+	_detail.text = ""
+
+
+func show_remote_pause() -> void:
+	## Passive overlay for an online client while the host paused the
+	## match: no local actions (only the host resumes), so no menu items.
+	open("PAUSED", "The host paused the match", [])
+	_detail.text = "HOST PAUSED - WAITING FOR THE HOST TO RESUME"
 
 
 func show_return_confirm() -> void:
@@ -34,3 +44,4 @@ func show_return_confirm() -> void:
 			make_item("NO, KEEP PLAYING", Callable(host, "cmd_resume")),
 		]
 	)
+	_detail.text = ""

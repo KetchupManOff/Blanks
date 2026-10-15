@@ -5,7 +5,7 @@ extends RefCounted
 ## reaches its duration, and then waits for a release. Headless tests
 ## drive it with synthetic snapshots.
 
-const DEFAULT_HOLD_SECONDS := 3.0
+const DEFAULT_HOLD_SECONDS := 2.0
 
 ## idle: no candidate held; held: accumulating; complete: claimed, waiting
 ## for the button to be released.

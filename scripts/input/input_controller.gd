@@ -8,13 +8,14 @@ extends Node
 ## assigned device is polled against its slot's profile controller
 ## bindings only - never against the global InputMap - so several profiles
 ## can coexist on different pads and one pad never drives several players.
-## The shared keyboard profile drives the global InputMap for solo input;
-## coop keeps the fixed keyboard clusters from coop_bindings.gd as a
-## non-controller fallback. Pause/restart fire from the keyboard or from
-## any slot's own profile mapping on its assigned pad.
+## Keyboard ownership follows the same rule: the active profile's mapping
+## drives the global InputMap for solo input and menus, while coop slots
+## poll their own profile's keyboard records directly so bindings never
+## bleed between players. Pause/restart fire from any pollable slot's own
+## profile mapping locally; online they are host-only (clients ignore
+## them) so a local key can never pause or reset an authoritative run.
 
 const PlayConfig = preload("res://scripts/core/constants.gd")
-const CoopBindings = preload("res://scripts/input/coop_bindings.gd")
 const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 
 # Single-fire actions and the host methods they trigger.
@@ -27,9 +28,12 @@ const _SINGLE_FIRE := {
 	"restart": "action_restart",
 }
 
-# Actions that stay shared in coop (keyboard via the InputMap, pads via
-# each slot's own profile mapping).
+# Actions that stay shared in coop (keyboard or pad via any slot's own
+# profile mapping, host-only while online).
 const _SHARED_ACTIONS := ["pause", "restart"]
+
+# Per-slot single-fire gameplay actions (movement-held actions excluded).
+const _COOP_SINGLE_FIRE := ["hard_drop", "rotate_cw", "rotate_ccw", "hold"]
 
 const AXIS_DEADZONE := 0.5
 
@@ -52,6 +56,7 @@ var _solo_bindings: Dictionary = {}
 var _coop_player_count: int = 0
 var _coop_profile_ids: Array = []  # per-slot profile id
 var _coop_profiles: Array = []  # per-slot sanitized controller-only profiles
+var _coop_keyboards: Array = []  # per-slot sanitized keyboard-only profiles
 var _coop_devices: Array = []  # per-slot device id (< 0 = keyboard only)
 # Online coop: slots are network-wide; only the local slot is pollable.
 # Remote slots keep aligned indices but never read local hardware.
@@ -128,11 +133,12 @@ func begin_solo(profile_id: String, device: int) -> void:
 
 func begin_coop(assignments: Array) -> void:
 	## Each entry is {"profile_id": String, "device": int}; slot order is
-	## player order. Keyboard-only slots pass device < 0 and keep their
-	## fixed keyboard cluster.
+	## player order. Every slot polls its own profile's keyboard records
+	## directly (plus its assigned pad against the controller records).
 	_coop_player_count = 0
 	_coop_profile_ids = []
 	_coop_profiles = []
+	_coop_keyboards = []
 	_coop_devices = []
 	_coop_pollable = []
 	_coop_left = []
@@ -149,6 +155,7 @@ func begin_coop(assignments: Array) -> void:
 		var device := int(assignment.get("device", -1))
 		_coop_profile_ids.append(profile_id)
 		_coop_profiles.append(_bindings_for_profile(profile_id))
+		_coop_keyboards.append(_keybindings_for_profile(profile_id))
 		_coop_devices.append(device)
 		_coop_pollable.append(true)
 		_coop_left.append(false)
@@ -163,32 +170,22 @@ func begin_coop(assignments: Array) -> void:
 
 func begin_online(own_slot: int, player_count: int, profile_id: String, device: int) -> void:
 	## Online coop: slot indices are network-wide roster slots. Only
-	## `own_slot` maps to local hardware - its keyboard cluster plus the
-	## assigned pad polled against the local profile's bindings. Remote
-	## slots exist as placeholders so indices stay aligned but never poll,
-	## so local input can never drive another peer's player.
+	## `own_slot` maps to local hardware - its profile's keyboard records
+	## plus the assigned pad polled against the local profile's controller
+	## bindings. Remote slots exist as placeholders so indices stay aligned
+	## but never poll, so local input can never drive another peer's
+	## player.
+	reset_online_session()
 	if own_slot < 0 or own_slot >= player_count:
 		push_error("input: online begin with own_slot %d outside %d slots" % [own_slot, player_count])
-		end_coop()
 		return
-	_coop_player_count = 0
-	_coop_profile_ids = []
-	_coop_profiles = []
-	_coop_devices = []
-	_coop_pollable = []
-	_coop_left = []
-	_coop_right = []
-	_coop_dir = []
-	_coop_das = []
-	_coop_arr = []
-	_coop_soft = []
-	_coop_fire_prev = []
 	for i in player_count:
 		var is_own: bool = i == own_slot
 		var slot_profile := profile_id if is_own else ""
 		var slot_device := device if is_own else -1
 		_coop_profile_ids.append(slot_profile)
 		_coop_profiles.append(_bindings_for_profile(slot_profile))
+		_coop_keyboards.append(_keybindings_for_profile(slot_profile))
 		_coop_devices.append(slot_device)
 		_coop_pollable.append(is_own)
 		_coop_left.append(false)
@@ -201,10 +198,19 @@ func begin_online(own_slot: int, player_count: int, profile_id: String, device: 
 		_coop_player_count += 1
 
 
+func reset_online_session() -> void:
+	## Release held edges and discard slot ownership before an online run is
+	## torn down or rebuilt. The controller node persists across rounds.
+	release_all()
+	_prev_single_fire = {}
+	end_coop()
+
+
 func end_coop() -> void:
 	_coop_player_count = 0
 	_coop_profile_ids = []
 	_coop_profiles = []
+	_coop_keyboards = []
 	_coop_devices = []
 	_coop_pollable = []
 	_coop_left = []
@@ -217,19 +223,27 @@ func end_coop() -> void:
 
 
 func refresh_profile(profile_id: String) -> void:
-	## Live rebind support: reload a profile's controller bindings while a
-	## run holds the assignment (e.g. guided rebinding opened from pause).
+	## Live rebind support: reload a profile's controller and keyboard
+	## bindings while a run holds the assignment (e.g. guided rebinding
+	## opened from pause or the profile browser).
 	if _solo_profile_id == profile_id:
 		_solo_bindings = _bindings_for_profile(profile_id)
 	for i in _coop_player_count:
 		if String(_coop_profile_ids[i]) == profile_id:
 			_coop_profiles[i] = _bindings_for_profile(profile_id)
+			_coop_keyboards[i] = _keybindings_for_profile(profile_id)
 
 
 func _bindings_for_profile(profile_id: String) -> Dictionary:
 	if profile_id.is_empty() or _host == null or _host.settings == null:
 		return {}
 	return _host.settings.controller_bindings_for(profile_id)
+
+
+func _keybindings_for_profile(profile_id: String) -> Dictionary:
+	if profile_id.is_empty() or _host == null or _host.settings == null:
+		return {}
+	return _host.settings.keyboard_bindings_for(profile_id)
 
 
 func coop_device_for(player: int) -> int:
@@ -245,6 +259,13 @@ func coop_profile_bindings(player: int) -> Dictionary:
 	return _coop_profiles[player]
 
 
+func coop_keyboard_bindings(player: int) -> Dictionary:
+	## Test/inspection helper: the keyboard bindings polled for a slot.
+	if player < 0 or player >= _coop_player_count:
+		return {}
+	return _coop_keyboards[player]
+
+
 # ------------------------------------------------------------------- input
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -256,12 +277,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _host != null and not _host.is_gameplay_input_enabled():
 		return
 	if _coop_player_count > 0:
-		for action in _SHARED_ACTIONS:
-			if event.is_action_pressed(action):
-				_fire(action)
-				_prev_single_fire[action] = true
-				get_viewport().set_input_as_handled()
-				return
 		_coop_event(event)
 		return
 	for action in _SINGLE_FIRE:
@@ -312,20 +327,36 @@ func _fire(action: String) -> void:
 # ------------------------------------------------------------------- coop
 
 func _poll_shared_single_fire() -> void:
-	# Pause/restart stay shared: keyboard via the global InputMap plus any
-	# slot's own profile mapping on its assigned pad.
+	# Pause/restart stay shared: any pollable slot's own profile mapping may
+	# fire them - keyboard records polled directly, pads via the assigned
+	# device. Online clients never locally transition an authoritative run,
+	# so the shared actions stop firing (and stop tracking) there.
+	if not _shared_fire_allowed():
+		_prev_single_fire = {}
+		return
 	var connected: Array = Input.get_connected_joypads()
 	for action in _SHARED_ACTIONS:
-		var pressed: bool = Input.is_action_pressed(action)
-		if not pressed:
-			for i in _coop_player_count:
-				if _device_action(_coop_devices[i], _coop_profiles[i], action, connected):
-					pressed = true
-					break
+		var pressed: bool = false
+		for i in _coop_player_count:
+			if not bool(_coop_pollable[i]):
+				continue
+			if DefaultBindings.keyboard_action_held(_coop_keyboards[i], action):
+				pressed = true
+				break
+			if _device_action(_coop_devices[i], _coop_profiles[i], action, connected):
+				pressed = true
+				break
 		var previous: bool = _prev_single_fire.get(action, false)
 		if pressed and not previous:
 			_fire(action)
 		_prev_single_fire[action] = pressed
+
+
+## True while shared (pause/restart) actions may fire. Online clients may
+## never locally pause or restart the host-authoritative run; the host
+## alone owns the match-state transitions.
+func _shared_fire_allowed() -> bool:
+	return _host == null or not _host.is_online_client()
 
 
 func _poll_coop(delta: float) -> void:
@@ -338,12 +369,12 @@ func _poll_coop(delta: float) -> void:
 
 
 func _poll_coop_player(i: int, connected: Array, delta: float) -> void:
-	var keys: Dictionary = CoopBindings.keyboard_preset(i)
+	var keys: Dictionary = _coop_keyboards[i]
 	var device: int = _coop_devices[i]
 	var bindings: Dictionary = _coop_profiles[i]
-	var left: bool = Input.is_physical_key_pressed(keys["move_left"]) or _device_action(device, bindings, "move_left", connected)
-	var right: bool = Input.is_physical_key_pressed(keys["move_right"]) or _device_action(device, bindings, "move_right", connected)
-	var soft: bool = Input.is_physical_key_pressed(keys["soft_drop"]) or _device_action(device, bindings, "soft_drop", connected)
+	var left: bool = DefaultBindings.keyboard_action_held(keys, "move_left") or _device_action(device, bindings, "move_left", connected)
+	var right: bool = DefaultBindings.keyboard_action_held(keys, "move_right") or _device_action(device, bindings, "move_right", connected)
+	var soft: bool = DefaultBindings.keyboard_action_held(keys, "soft_drop") or _device_action(device, bindings, "soft_drop", connected)
 
 	if left and not _coop_left[i]:
 		_coop_press_dir(i, -1)
@@ -360,8 +391,8 @@ func _poll_coop_player(i: int, connected: Array, delta: float) -> void:
 		_coop_soft[i] = soft
 		_host.action_coop_soft_drop(i, soft)
 
-	for action in CoopBindings.SINGLE_FIRE_ACTIONS:
-		var pressed: bool = Input.is_physical_key_pressed(keys[action]) or _device_action(device, bindings, action, connected)
+	for action in _COOP_SINGLE_FIRE:
+		var pressed: bool = DefaultBindings.keyboard_action_held(keys, action) or _device_action(device, bindings, action, connected)
 		var previous: bool = _coop_fire_prev[i].get(action, false)
 		if pressed and not previous:
 			_coop_fire(i, action)
@@ -371,45 +402,54 @@ func _poll_coop_player(i: int, connected: Array, delta: float) -> void:
 
 
 func _coop_event(event: InputEvent) -> void:
-	# Instant single-fire response for coop: keyboard cluster keys and
+	# Instant single-fire response for coop: per-slot keyboard records and
 	# profile-mapped events from an assigned pad. Online remote slots are
 	# skipped: a local keypress must never move another peer's player.
 	if event is InputEventKey:
-		var k := event as InputEventKey
-		if not k.pressed:
+		var record := DefaultBindings.record_from_event(event)
+		if record.is_empty():
 			return
 		for i in _coop_player_count:
 			if not bool(_coop_pollable[i]):
 				continue
-			var keys: Dictionary = CoopBindings.keyboard_preset(i)
-			for action in CoopBindings.SINGLE_FIRE_ACTIONS:
-				if k.physical_keycode == keys[action]:
-					_coop_fire(i, action)
-					_coop_fire_prev[i][action] = true
-					get_viewport().set_input_as_handled()
-					return
+			var action := DefaultBindings.action_for_record(_coop_keyboards[i], record)
+			if action.is_empty():
+				continue
+			if _fire_matched_action(i, action):
+				return
 	elif event is InputEventJoypadButton or event is InputEventJoypadMotion:
-		var record := _record_from_event(event)
-		if record.is_empty():
+		var pad_record := _record_from_event(event)
+		if pad_record.is_empty():
 			return
 		for i in _coop_player_count:
 			if not bool(_coop_pollable[i]):
 				continue
 			if event.device != _coop_devices[i]:
 				continue
-			var action := DefaultBindings.action_for_record(_coop_profiles[i], record)
+			var action := DefaultBindings.action_for_record(_coop_profiles[i], pad_record)
 			if action.is_empty():
 				continue
-			if CoopBindings.SINGLE_FIRE_ACTIONS.has(action):
-				_coop_fire(i, action)
-				_coop_fire_prev[i][action] = true
-				get_viewport().set_input_as_handled()
+			if _fire_matched_action(i, action):
 				return
-			if _SHARED_ACTIONS.has(action):
-				_fire(action)
-				_prev_single_fire[action] = true
-				get_viewport().set_input_as_handled()
-				return
+
+
+## Fire one action matched for a slot's bindings. Returns true when the
+## event is consumed. Shared actions are host-gated online; movement
+## actions belong to the polling loop and never fire from events.
+func _fire_matched_action(i: int, action: String) -> bool:
+	if _SHARED_ACTIONS.has(action):
+		if not _shared_fire_allowed():
+			return false
+		_fire(action)
+		_prev_single_fire[action] = true
+		get_viewport().set_input_as_handled()
+		return true
+	if _COOP_SINGLE_FIRE.has(action):
+		_coop_fire(i, action)
+		_coop_fire_prev[i][action] = true
+		get_viewport().set_input_as_handled()
+		return true
+	return false
 
 
 func _solo_device_event(event: InputEvent) -> void:

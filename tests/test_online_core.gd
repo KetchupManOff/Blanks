@@ -123,6 +123,134 @@ func test_snapshot_rejects_malformed_payloads() -> void:
 	check_false(game.apply_snapshot(snap), "wrong board size rejected")
 
 
+func test_lock_events_carry_stable_revisions() -> void:
+	## Every lock event carries the engine's revision counter; snapshot
+	## rebuilds on a twin restore the same revision so audio/HUD edges
+	## identify host events without comparing object instances.
+	var game := _new_coop(2, MARATHON)
+	check_eq(game.event_revision, 0, "fresh game carries no event revision")
+	var twin := CoopGameScript.new(2, MARATHON, game.seed)
+	game.hard_drop(0)
+	check_eq(game.event_revision, 1, "lock advances the event revision")
+	var snap: Dictionary = game.to_snapshot()
+	var event_snap: Dictionary = snap["players"][0]["event"]
+	check_eq(event_snap["rev"], 1, "event payload carries the revision")
+	check_eq(event_snap["hard_drop"], true, "hard-drop locks are flagged")
+	check_true(twin.apply_snapshot(snap), "twin accepts the snapshot")
+	check_eq(twin.event_revision, 1, "twin restores the revision counter")
+	check_eq(twin.players[0].last_event.rev, 1, "rebuilt twin event carries the same revision")
+	check_eq(twin.players[0].last_event.hard_drop, true, "rebuilt twin event keeps the flag")
+
+
+func test_natural_locks_advance_revisions_unflagged() -> void:
+	## Lock-delay expiry creates events without the hard-drop flag; the
+	## revision advances exactly once per lock.
+	var game := _new_coop(2, MARATHON)
+	# Fill the bottom row: spawned pieces descend onto it (soft drop keeps
+	# the descent fast), ground out, and lock through the lock delay.
+	for x in game.board.WIDTH:
+		game.debug_set_cell(x, game.board.HEIGHT - 1, TetrominoData.Kind.J)
+	game.set_soft_drop(0, true)
+	game.set_soft_drop(1, true)
+	_tick(game, 600)
+	check_true(game.players[0].last_event != null, "player 0 locked naturally on the filled row")
+	check_eq(game.players[0].last_event.hard_drop, false, "natural locks carry no hard-drop flag")
+	check_true(game.event_revision >= 1, "natural lock advanced the revision")
+	var rev_before: int = game.event_revision
+	var snap: Dictionary = game.to_snapshot()
+	var twin := CoopGameScript.new(2, MARATHON, game.seed)
+	check_true(twin.apply_snapshot(snap), "twin accepts the snapshot")
+	check_eq(twin.event_revision, rev_before, "twin revision matches the host")
+	check_eq(twin.players[0].last_event.hard_drop, false, "twin natural lock carries no flag")
+
+
+func test_repeated_snapshot_apply_is_idempotent() -> void:
+	## Applying an identical snapshot repeatedly never advances event
+	## identity: the twin keeps the same revision (fresh objects per apply,
+	## same authoritative revision) and audio edges stay quiet.
+	var game := _new_coop(2, MARATHON)
+	game.hard_drop(0)
+	var snap: Dictionary = game.to_snapshot()
+	var twin := CoopGameScript.new(2, MARATHON, game.seed)
+	check_true(twin.apply_snapshot(snap), "first apply")
+	var rev: int = twin.event_revision
+	var event_rev: int = twin.players[0].last_event.rev
+	var event_hard_drop: bool = twin.players[0].last_event.hard_drop
+	for i in 5:
+		check_true(twin.apply_snapshot(snap), "repeated apply %d accepted" % (i + 1))
+		check_eq(twin.event_revision, rev, "revision unchanged by identical snapshots")
+		check_eq(twin.players[0].last_event.rev, event_rev, "same host event revision observed")
+		check_eq(twin.players[0].last_event.hard_drop, event_hard_drop, "event identity stable across rebuilds")
+	check_eq(twin.to_snapshot(), snap, "twin state still identical")
+
+
+# ------------------------------------------------------------- display names
+
+func test_normalize_display_name() -> void:
+	## The protocol-safe normalizer: one line, collapsed whitespace, no
+	## control characters, bounded length, deterministic fallback.
+	check_eq(ServiceScript.normalize_display_name("  Alice \n\t Quin  ", "FB"), "Alice Quin", "whitespace runs collapse and trim")
+	check_eq(ServiceScript.normalize_display_name("Line1\r\nLine2", "FB"), "Line1 Line2", "newlines collapse to a single space")
+	check_eq(ServiceScript.normalize_display_name("A  B C  D", "FB"), "A B C D", "multiple spaces collapse")
+	check_eq(ServiceScript.normalize_display_name("AB".repeat(40), "FB"), "AB".repeat(8), "length capped to 16 characters")
+	check_eq(ServiceScript.normalize_display_name("", "FB"), "FB", "empty falls back")
+	check_eq(ServiceScript.normalize_display_name("   ", "FB"), "FB", "whitespace-only falls back")
+	check_eq(ServiceScript.normalize_display_name(null, "FB"), "FB", "null falls back")
+	check_eq(ServiceScript.normalize_display_name(7, "FB"), "7", "numbers stringify")
+	check_eq(ServiceScript.normalize_display_name("\u0007Beep\u0007", "FB"), "Beep", "control characters excluded")
+	var name := ServiceScript.normalize_display_name("  A  ", "")
+	check_true(name.length() >= 1, "fallback itself never yields an empty name")
+
+
+func test_pause_envelope_validation() -> void:
+	## Pause replication is host-only and in-match only: clients ignore
+	## peer/stale senders and malformed payloads, and the host never
+	## applies a client frame.
+	var host_stub := _pause_recording_host()
+	var service := _ensure_service()
+	service.game_host = host_stub
+	service.is_host = false
+	service.roster = [{"peer_id": 1, "name": "H", "ready": true, "slot": 0, "connected": true}]
+	service._set_state(ServiceScript.State.IN_MATCH)
+	# Non-host sender and malformed payloads are dropped.
+	service._net.receive(2, NetScript.encode(NetScript.MSG_PAUSE_STATE, 2, {"paused": true, "rev": 3}))
+	check_eq(host_stub.pause_applies.size(), 0, "client sender ignored")
+	service._net.receive(1, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": "yes", "rev": 3}))
+	check_eq(host_stub.pause_applies.size(), 0, "malformed paused ignored")
+	service._net.receive(1, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": true, "rev": 1.5}))
+	check_eq(host_stub.pause_applies.size(), 0, "float revision ignored")
+	service._net.receive(1, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": true}))
+	check_eq(host_stub.pause_applies.size(), 0, "missing revision ignored")
+	# The host itself ignores pause frames entirely.
+	service.is_host = true
+	service._net.receive(2, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": true, "rev": 3}))
+	check_eq(host_stub.pause_applies.size(), 0, "host never applies client pause frames")
+	# Out-of-match frames are dropped even from the host.
+	service.is_host = false
+	service._set_state(ServiceScript.State.LOBBY)
+	service._net.receive(1, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": true, "rev": 3}))
+	check_eq(host_stub.pause_applies.size(), 0, "out-of-match pause ignored")
+	# A valid frame applies through the GameHost hook.
+	service._set_state(ServiceScript.State.IN_MATCH)
+	service._net.receive(1, NetScript.encode(NetScript.MSG_PAUSE_STATE, 1, {"paused": true, "rev": 3}))
+	check_eq(host_stub.pause_applies, [[true, 3]], "valid pause applied by revision")
+	service.leave_session()
+	service.game_host = null
+	host_stub.free()
+
+
+class PauseRecordingHost:
+	extends Node
+	var pause_applies: Array = []
+
+	func online_set_paused(paused: bool, rev: int) -> void:
+		pause_applies.append([paused, rev])
+
+
+func _pause_recording_host() -> Node:
+	return PauseRecordingHost.new()
+
+
 # ------------------------------------------------------------------- intents
 
 func test_intent_validator_accepts_owned_sequence() -> void:

@@ -6,6 +6,7 @@ extends Node
 
 const CoreGame = preload("res://scripts/core/game.gd")
 const CoopGame = preload("res://scripts/core/coop_game.gd")
+const CompetitiveGame = preload("res://scripts/core/competitive_game.gd")
 const BoardClass = preload("res://scripts/core/board.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 const TetrominoData = preload("res://scripts/core/tetromino_data.gd")
@@ -15,6 +16,7 @@ const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const InputController = preload("res://scripts/input/input_controller.gd")
 const BoardRenderer = preload("res://scripts/presentation/board_renderer.gd")
 const CoopBoardRenderer = preload("res://scripts/presentation/coop_board_renderer.gd")
+const CompetitiveBoardRenderer = preload("res://scripts/presentation/competitive_board_renderer.gd")
 const MiniPieceRenderer = preload("res://scripts/presentation/mini_piece_renderer.gd")
 const BoardPresenter = preload("res://scripts/presentation/board_presenter.gd")
 const Hud = preload("res://scripts/ui/hud.gd")
@@ -43,15 +45,36 @@ const HOLD_POS := Vector2(120.0, 96.0)
 const PREVIEW_POS := Vector2(1060.0, 96.0)
 const PREVIEW_SPACING := 104.0
 const LOGICAL_VIEWPORT := Vector2i(1280, 720)
+## Visual catch-up window for online client rendering: the time a remote
+## piece takes to move from the previous to the current authoritative
+## sample. Presentation-only: gameplay state always snaps to the newest
+## authoritative snapshot.
+const ONLINE_RENDER_CATCHUP_MS := 100.0
 
 # --- Coop layout (computed from the player count) ---
 const COOP_PREVIEW_SHOWN: int = 3
 const COOP_BOARD_Y: float = 96.0
 const COOP_STRIP_GAP: float = 8.0
 
+# --- Competitive layout (independent boards; re-laid out as Tower grows) ---
+# Strip above each board: player tag, stats line, hold, then previews.
+const COMPETITIVE_PREVIEW_SHOWN: int = 3
+const COMPETITIVE_STRIP_GAP: float = 8.0
+const COMPETITIVE_STRIP_TAG_Y: float = 2.0
+const COMPETITIVE_STRIP_STATS_Y: float = 22.0
+const COMPETITIVE_STRIP_MINIS_Y: float = 42.0
+const COMPETITIVE_TOP_MARGIN: float = 116.0
+const COMPETITIVE_BOTTOM_MARGIN: float = 16.0
+const COMPETITIVE_BOARD_GAP: float = 24.0
+const COMPETITIVE_SIDE_MARGIN: float = 32.0
+
 var state: int = HostState.MAIN_MENU
 var core: CoreGame = null
 var coop: CoopGame = null
+## Independent-board competitive run (solo Tower, local multiplayer
+## Versus/Tower, or an online competitive match). Mutually exclusive with
+## `core` and `coop`.
+var competitive: CompetitiveGame = null
 var settings: SettingsClass = null
 var themes: Node = null
 
@@ -91,9 +114,28 @@ var _online_service: Node = null
 var _online_menu: CanvasLayer = null
 var _online_slot: int = -1  # this machine's roster slot while online
 var _online_signature: int = -1  # last broadcast sim signature (host)
+# --- Authoritative online pause state (host-authoritative, global) ---
+# The host alone toggles pause; clients replicate it. A monotonically
+# increasing revision orders pause/resume against inbound snapshots so a
+# stale snapshot never reopens input after a newer pause. Reset with every
+# run begin/teardown.
+var _online_paused: bool = false
+var _pause_revision: int = 0
+# Newest authoritative simulation tick applied to this machine's twin
+# (client) or simulated (host); snapshots older than it are dropped.
+var _online_last_tick: int = -1
+# --- Online render interpolation samples (client, presentation-only) ---
+# Previous/current authoritative samples with receive timestamps so board
+# renderers can smooth remote piece movement between snapshots.
+var _render_samples: Dictionary = {}
 # True while settings was opened from the profile screen: Back returns to
 # the profile browser instead of the main menu.
 var _settings_from_profiles: bool = false
+# True while the profile picker is open for a solo-mode start (opened from
+# the solo chooser): Back returns to the solo chooser instead of the
+# top-level menu. Cleared on selection, cancel, and every return to the
+# main menu so stale context never redirects a later picker exit.
+var _profile_picker_from_solo: bool = false
 var _last_results: Dictionary = {}
 
 # --- Run bookkeeping for result recording ---
@@ -124,6 +166,27 @@ var _coop_previews: Array = []
 var _coop_tags: Array[Label] = []
 var _title_labels: Array[Label] = []
 
+# Per-run competitive presentation nodes (rebuilt for every match). Each
+# player owns a dedicated presenter (bloom SubViewport path) plus strip
+# nodes; presenters own their renderers, so only the strip nodes and the
+# presenters themselves need explicit teardown.
+var _competitive_presenters: Array = []
+var _competitive_nodes: Array[Node] = []
+var _competitive_holds: Array[Node2D] = []
+var _competitive_previews: Array = []
+var _competitive_tags: Array[Label] = []
+var _competitive_stats: Array[Label] = []
+var _competitive_layout_heights: Array[int] = []
+# Independent-board renderers (one per presenter), kept for render-sample
+# pushes while an online client renders the twin.
+var _competitive_renderers: Array = []
+# Audio edges for the competitive core, mirroring the coop trackers.
+var _competitive_event_id: int = 0
+var _competitive_event_player: int = -1
+var _competitive_prev_phase: int = 0
+var _competitive_prev_eliminated: Array[bool] = []
+var _competitive_soft_drop_active: Array[bool] = []
+
 
 func _ready() -> void:
 	settings = SettingsClass.new()
@@ -132,7 +195,10 @@ func _ready() -> void:
 	# code-created node starts with the resolved tokens.
 	_ensure_theme_manager()
 	_apply_display_settings()
-	DefaultBindings.apply_keyboard_profile(settings.keyboard_bindings)
+	# The active profile's keyboard mapping is the global InputMap owner
+	# for menus and solo play; other profiles are polled directly by the
+	# input controller during multiplayer.
+	DefaultBindings.apply_keyboard_profile(settings.active_keyboard_bindings())
 	_build_scene()
 	_show_main_menu()
 
@@ -299,11 +365,15 @@ func _notification(what: int) -> void:
 # ---------------------------------------------------------------- game flow
 
 func _start_game(mode: int, profile_id: String = "") -> void:
+	if ModeRules.is_competitive(mode):
+		_start_tower_solo(profile_id)
+		return
 	core = CoreGame.new(mode, randi())
 	coop = null
-	_coop_assignments = []
+	competitive = null
 	_input.end_coop()
 	_teardown_coop_scene()
+	_teardown_competitive_scene()
 	state = HostState.PLAYING
 	_accumulator = 0.0
 	_reset_solo_audio_edges()
@@ -349,7 +419,9 @@ func _start_coop(assignments: Array, game_mode: int) -> void:
 	if resolved.is_empty():
 		return
 	core = null
+	competitive = null
 	_teardown_coop_scene()
+	_teardown_competitive_scene()
 	coop = CoopGame.new(resolved.size(), game_mode, randi())
 	state = HostState.PLAYING
 	_accumulator = 0.0
@@ -381,6 +453,67 @@ static func _dedupe_profile_ids(assignments: Array) -> Array:
 	return ids
 
 
+# ------------------------------------------------------- competitive runs
+# Independent-board matches (solo Tower via the profile picker, local
+# multiplayer Classic Versus/Tower via the lobby). The CompetitiveGame
+# core lives here exactly like `core` and `coop`; a one-player Tower run
+# keeps the solo input path (shared keyboard profile + one pad), while
+# multiplayer matches reuse the coop per-slot input path.
+
+func _start_tower_solo(profile_id: String = "") -> void:
+	var device: int = _first_connected_device()
+	var assignments: Array = [{"profile_id": profile_id, "device": device, "name": ""}]
+	_start_competitive(assignments, ModeRules.Mode.TOWER, false)
+
+
+func _start_competitive(assignments: Array, game_mode: int, garbage: bool) -> void:
+	## Each entry is {"profile_id": String, "device": int} in player order.
+	var resolved: Array = []
+	for assignment in assignments:
+		if not (assignment is Dictionary):
+			continue
+		var profile_id := String(assignment.get("profile_id", ""))
+		if profile_id.is_empty():
+			continue
+		resolved.append({
+			"profile_id": profile_id,
+			"device": int(assignment.get("device", -1)),
+			"name": String(assignment.get("name", "")),
+		})
+	if not ModeRules.valid_competitive_match(game_mode, resolved.size(), garbage):
+		return
+	core = null
+	coop = null
+	_teardown_coop_scene()
+	_teardown_competitive_scene()
+	competitive = CompetitiveGame.new(game_mode, randi(), resolved.size(), garbage)
+	state = HostState.PLAYING
+	_accumulator = 0.0
+	_reset_competitive_audio_edges()
+	_hud.set_combo("")
+	_hud.set_event("", 0)
+	_coop_assignments = resolved
+	if resolved.size() == 1:
+		_run_profile_ids = [] if String(resolved[0]["profile_id"]).is_empty() else [resolved[0]["profile_id"]]
+	else:
+		_run_profile_ids = _dedupe_profile_ids(resolved)
+	_run_result_recorded = false
+	if resolved.size() == 1:
+		_input.begin_solo(String(resolved[0]["profile_id"]), int(resolved[0]["device"]))
+	else:
+		_input.begin_coop(resolved)
+	_build_competitive_scene()
+	_menu.close()
+	_coop_setup.close()
+	_pause_menu.close()
+	_settings_screen.close()
+	_profile_screen.close()
+	_audio.set_music_context(false)
+	_audio.set_music_active(true)
+	_audio.set_music_paused(false)
+	_update_presentation()
+
+
 func _show_main_menu() -> void:
 	if _online_service != null and _online_service.is_in_session():
 		# Leaving for the main menu exits any online lobby/match first; the
@@ -388,13 +521,16 @@ func _show_main_menu() -> void:
 		_online_service.leave_session()
 	core = null
 	coop = null
+	competitive = null
 	_input.end_coop()
 	_teardown_coop_scene()
+	_teardown_competitive_scene()
 	# Returning to the menu discards the run, including its recording
 	# bookkeeping: an abandoned run never records a result.
 	_run_profile_ids = []
 	_coop_assignments = []
 	_run_result_recorded = false
+	_profile_picker_from_solo = false
 	state = HostState.MAIN_MENU
 	_pause_menu.close()
 	_settings_screen.close()
@@ -416,13 +552,16 @@ func _show_results(title: String, subtitle: String) -> void:
 
 
 func _update_presentation() -> void:
-	var in_run: bool = core != null or coop != null
+	var in_run: bool = core != null or coop != null or competitive != null
 	_field.visible = in_run
 	_hud.visible = in_run
 	if _board_presenter != null:
 		# Render-target updates (and the bloom pass) run only while a run
 		# shows the field: active, paused, or under its results overlay.
-		_board_presenter.set_presenting(in_run)
+		# Competitive runs present through their own per-player presenters.
+		_board_presenter.set_presenting(in_run and competitive == null)
+	for presenter in _competitive_presenters:
+		presenter.set_presenting(in_run)
 	# Menu media only shows when the playfield is hidden: during a run
 	# (including pause/results) the game backdrop stays behind everything
 	# and the menu backdrop never peeks over the frozen field.
@@ -430,6 +569,9 @@ func _update_presentation() -> void:
 	var solo_visible: bool = core != null
 	for node in _solo_nodes:
 		node.visible = solo_visible
+	var competitive_visible: bool = competitive != null
+	for node in _competitive_nodes:
+		node.visible = competitive_visible
 	if not in_run:
 		_board_renderer.core = null
 		_board_renderer.queue_redraw()
@@ -453,7 +595,7 @@ func _coop_cell_size(player_count: int) -> float:
 ## Solo render-target bounds: the full board including the hidden spawn
 ## rows, so the peek above the panel is processed consistently.
 func _solo_board_size() -> Vector2:
-	return Vector2(BoardClass.DEFAULT_WIDTH, BoardClass.HEIGHT) * BoardRenderer.CELL
+	return Vector2(BoardClass.DEFAULT_WIDTH, BoardClass.DEFAULT_HEIGHT) * BoardRenderer.CELL
 
 
 # ---------------------------------------------------------------- theme
@@ -488,6 +630,7 @@ func _apply_theme() -> void:
 	_profile_screen.apply_theme(tokens, media)
 	_osk.apply_theme(tokens, media)
 	_apply_coop_theme(tokens, media)
+	_apply_competitive_theme(tokens, media)
 
 
 ## Theme font override helper: null clears the override so the built-in
@@ -538,7 +681,7 @@ func _build_coop_scene() -> void:
 
 	# The shared board presents through the same wrapper, sized from the
 	# dynamic geometry (total width, full height, current cell).
-	_board_presenter.set_layout(Vector2(board_x, COOP_BOARD_Y), Vector2(board_w, cell * BoardClass.HEIGHT))
+	_board_presenter.set_layout(Vector2(board_x, COOP_BOARD_Y), Vector2(board_w, cell * BoardClass.DEFAULT_HEIGHT))
 
 	_coop_renderer = CoopBoardRenderer.new()
 	_coop_renderer.cell = cell
@@ -625,9 +768,189 @@ func _teardown_coop_scene() -> void:
 		_board_presenter.install(_board_renderer)
 
 
+# --------------------------------------------------------- competitive layout
+# One dedicated presenter + renderer per player; strip nodes (tag, stats,
+# hold, previews) live directly on the field. Re-laid out whenever any
+# Tower board grows: the floor stays anchored to the bottom margin and the
+# complete board scales down to fit the available vertical space, so
+# expansion is fully visible and never clipped by the bloom SubViewport.
+# Simulation geometry is never driven by these sizes.
+
+func _competitive_cell_cap(player_count: int) -> float:
+	match player_count:
+		1, 2:
+			return 28.0
+		3:
+			return 24.0
+		_:
+			return 18.0
+
+
+func _layout_competitive() -> void:
+	## Recomputes cell size, board origins, presenter bounds, and strip
+	## placement for the current per-player board heights.
+	var count: int = competitive.player_count
+	var avail_height: float = float(LOGICAL_VIEWPORT.y) - COMPETITIVE_TOP_MARGIN - COMPETITIVE_BOTTOM_MARGIN
+	var tallest: int = BoardClass.DEFAULT_HEIGHT
+	for i in count:
+		tallest = maxi(tallest, competitive.players[i].board.HEIGHT)
+	var cell: float = _competitive_cell_cap(count)
+	cell = minf(cell, avail_height / float(tallest))
+	var board_w: float = cell * BoardClass.DEFAULT_WIDTH
+	var total_w: float = count * board_w + (count - 1) * COMPETITIVE_BOARD_GAP
+	var x0: float = (float(LOGICAL_VIEWPORT.x) - total_w) * 0.5
+	var box: float = clampf((board_w - 3.0 * COMPETITIVE_STRIP_GAP) / 4.0, 28.0, 64.0)
+	var mini_scale: float = box / 96.0
+	_competitive_layout_heights = []
+	for i in count:
+		var height: int = competitive.players[i].board.HEIGHT
+		_competitive_layout_heights.append(height)
+		var presenter = _competitive_presenters[i]
+		var board_h: float = cell * height
+		# Bottom-anchor: the floor keeps its screen position as the board
+		# grows upward and the cell shrinks to keep everything visible.
+		var board_x: float = x0 + i * (board_w + COMPETITIVE_BOARD_GAP)
+		var board_y: float = float(LOGICAL_VIEWPORT.y) - COMPETITIVE_BOTTOM_MARGIN - board_h
+		presenter.set_layout(Vector2(board_x, board_y), Vector2(board_w, board_h))
+		var strip_x: float = board_x + board_w * 0.5 - (box * 4.0 + 3.0 * COMPETITIVE_STRIP_GAP) * 0.5
+		_competitive_tags[i].position = Vector2(strip_x, COMPETITIVE_STRIP_TAG_Y)
+		_competitive_stats[i].position = Vector2(strip_x, COMPETITIVE_STRIP_STATS_Y)
+		_competitive_holds[i].scale = Vector2(mini_scale, mini_scale)
+		_competitive_holds[i].position = Vector2(strip_x, COMPETITIVE_STRIP_MINIS_Y)
+		for j in _competitive_previews[i].size():
+			var mini: Node2D = _competitive_previews[i][j]
+			mini.scale = Vector2(mini_scale, mini_scale)
+			mini.position = Vector2(
+				strip_x + box + COMPETITIVE_STRIP_GAP + j * (box + COMPETITIVE_STRIP_GAP),
+				COMPETITIVE_STRIP_MINIS_Y
+			)
+
+
+func _build_competitive_scene() -> void:
+	var count: int = competitive.player_count
+	var media: Dictionary = themes.media()
+	var tokens: Dictionary = themes.tokens()
+	var bloom: float = clampf(float(media.get("bloom", 0.0)), 0.0, ThemeProfile.MAX_BLOOM_INTENSITY)
+	for i in count:
+		var presenter: BoardPresenter = BoardPresenter.new()
+		_field.add_child(presenter)
+		_competitive_presenters.append(presenter)
+		presenter.set_bloom_intensity(bloom)
+
+		var renderer: Node2D = CompetitiveBoardRenderer.new()
+		renderer.player_index = i
+		presenter.install(renderer)
+		_competitive_renderers.append(renderer)
+
+		var tag := Label.new()
+		tag.text = _competitive_player_tag(i)
+		tag.add_theme_font_size_override("font_size", 16)
+		tag.add_theme_color_override("font_color", _player_accent(i))
+		_field.add_child(tag)
+		_competitive_nodes.append(tag)
+		_competitive_tags.append(tag)
+
+		var stats := Label.new()
+		stats.add_theme_font_size_override("font_size", 14)
+		stats.add_theme_color_override("font_color", tokens["theme.dim"])
+		_field.add_child(stats)
+		_competitive_nodes.append(stats)
+		_competitive_stats.append(stats)
+
+		var hold_mini := MiniPieceRenderer.new()
+		_field.add_child(hold_mini)
+		_competitive_nodes.append(hold_mini)
+		_competitive_holds.append(hold_mini)
+
+		var row: Array = []
+		for j in COMPETITIVE_PREVIEW_SHOWN:
+			var mini := MiniPieceRenderer.new()
+			_field.add_child(mini)
+			_competitive_nodes.append(mini)
+			row.append(mini)
+		_competitive_previews.append(row)
+	_apply_competitive_theme(tokens, media)
+	_layout_competitive()
+
+
+func _teardown_competitive_scene() -> void:
+	# Presenters own their renderers (and their SubViewport bloom targets),
+	# so freeing a presenter frees the whole board subtree; strip nodes are
+	# freed directly. The solo presenter/layout is restored for whatever
+	# comes next.
+	for presenter in _competitive_presenters:
+		presenter.queue_free()
+	_competitive_presenters = []
+	_competitive_renderers = []
+	for node in _competitive_nodes:
+		node.visible = false
+		node.queue_free()
+	_competitive_nodes = []
+	_competitive_holds = []
+	_competitive_previews = []
+	_competitive_tags = []
+	_competitive_stats = []
+	_competitive_layout_heights = []
+	if _board_presenter != null and _board_renderer != null:
+		_board_presenter.set_layout(BOARD_POS, _solo_board_size())
+		_board_presenter.install(_board_renderer)
+
+
+## Competitive player tag: "P# <profile name>" locally, "P# <peer name>"
+## online; the bare player tag when no name is tracked.
+func _competitive_player_tag(player: int) -> String:
+	var profile_name := _coop_profile_display_name(player)
+	return "P%d %s" % [player + 1, profile_name] if not profile_name.is_empty() else "P%d" % (player + 1)
+
+
+func _competitive_player_name(player: int) -> String:
+	var profile_name := _coop_profile_display_name(player)
+	return profile_name if not profile_name.is_empty() else "P%d" % (player + 1)
+
+
+func _apply_competitive_theme(tokens: Dictionary, media: Dictionary) -> void:
+	if competitive == null or _competitive_presenters.is_empty():
+		return
+	var player_colors: Array = [
+		tokens["players.p1"], tokens["players.p2"], tokens["players.p3"], tokens["players.p4"],
+	]
+	var font: Font = media["font"]
+	var bloom: float = clampf(float(media.get("bloom", 0.0)), 0.0, ThemeProfile.MAX_BLOOM_INTENSITY)
+	for i in _competitive_presenters.size():
+		_competitive_presenters[i].set_bloom_intensity(bloom)
+		var renderer: Node2D = _competitive_presenters[i].installed_board()
+		if renderer != null:
+			renderer.apply_theme(tokens, media, player_colors[i % player_colors.size()])
+		if i < _competitive_tags.size():
+			_competitive_tags[i].add_theme_color_override("font_color", player_colors[i % player_colors.size()])
+			_apply_font_override(_competitive_tags[i], font)
+		if i < _competitive_stats.size():
+			_competitive_stats[i].add_theme_color_override("font_color", tokens["theme.dim"])
+			_apply_font_override(_competitive_stats[i], font)
+	for mini in _competitive_holds:
+		mini.apply_theme(tokens, media)
+	for row in _competitive_previews:
+		for mini in row:
+			mini.apply_theme(tokens, media)
+
+
 # ------------------------------------------------------------ host commands
 # Requested by menu/settings/profile/lobby UI. These are the only way UI
 # mutates flow.
+
+func cmd_open_solo_menu() -> void:
+	## Top-level SOLO category: swap the menu content for the solo chooser
+	## without touching any other menu/overlay state.
+	if state != HostState.MAIN_MENU:
+		return
+	_profile_picker_from_solo = false
+	_menu.show_solo_menu(self)
+
+
+func cmd_solo_menu_back() -> void:
+	## Solo chooser back (explicit row or ui_cancel): top-level main menu.
+	_show_main_menu()
+
 
 func cmd_start_marathon() -> void:
 	## Solo modes select a profile first; the pick screen starts the run.
@@ -638,13 +961,22 @@ func cmd_start_sprint() -> void:
 	cmd_select_profile_for_solo(ModeRules.Mode.SPRINT)
 
 
+func cmd_start_tower() -> void:
+	## Solo Tower follows the same profile-picker route as the other solo
+	## modes; multiplayer Tower lives in the coop lobby instead.
+	cmd_select_profile_for_solo(ModeRules.Mode.TOWER)
+
+
 func cmd_select_profile_for_solo(mode: int) -> void:
 	if state != HostState.MAIN_MENU:
 		return
-	if core != null or coop != null:
+	if core != null or coop != null or competitive != null:
 		# Defensive: a lingering run is discarded before a new one starts.
 		_show_main_menu()
 	_menu.close()
+	# The pick was opened for a solo start, not profile management: Back
+	# returns to the solo chooser (set after the defensive reset above).
+	_profile_picker_from_solo = true
 	_profile_screen.open_solo_start(mode)
 
 
@@ -663,6 +995,12 @@ func cmd_profile_screen_back() -> void:
 		_coop_setup.cancel_pending_claim()
 		_coop_setup.refresh()
 		return
+	if _profile_picker_from_solo:
+		# Canceled solo-start pick: return to the solo chooser, not the
+		# top-level menu.
+		_profile_picker_from_solo = false
+		_menu.show_solo_menu(self)
+		return
 	_show_main_menu()
 
 
@@ -671,6 +1009,7 @@ func cmd_solo_profile_selected(profile_id: String, mode: int) -> void:
 	## routes to it (keyboard-only starts remain possible).
 	if state != HostState.MAIN_MENU:
 		return
+	_profile_picker_from_solo = false
 	settings.set_active_profile(profile_id)
 	_profile_screen.close()
 	settings.save()
@@ -680,11 +1019,20 @@ func cmd_solo_profile_selected(profile_id: String, mode: int) -> void:
 func cmd_set_active_profile(profile_id: String) -> void:
 	if settings.set_active_profile(profile_id):
 		settings.save()
+		# The active profile owns the InputMap keyboard mapping; switching
+		# it re-installs the mapping so menus and solo play follow at once.
+		DefaultBindings.apply_keyboard_profile(settings.active_keyboard_bindings())
+		_input.refresh_profile(profile_id)
 		_profile_screen.refresh()
 
 
 func cmd_resume() -> void:
 	if state == HostState.PAUSED:
+		# Online host pause is authoritative: resuming broadcasts the
+		# resume to every peer instead of flipping local state alone.
+		if online_role == OnlineRole.HOST:
+			_online_host_pause_toggle()
+			return
 		state = HostState.PLAYING
 		_pause_menu.close()
 		_audio.set_music_paused(false)
@@ -697,11 +1045,24 @@ func cmd_restart_run() -> void:
 		# Online rounds restart through the lobby (a host command after the
 		# round), never mid-session: a local restart would desync peers.
 		return
+	if competitive != null:
+		_restart_competitive()
+		return
 	if coop != null:
 		_start_coop(_coop_assignments, coop.mode)
 	elif core != null:
 		var solo_profile := String(_run_profile_ids[0]) if not _run_profile_ids.is_empty() else ""
 		_start_game(core.mode, solo_profile)
+
+
+func _restart_competitive() -> void:
+	## Retry keeps the match configuration (mode, garbage setting, and
+	## slot assignments) and rolls a fresh seed.
+	if competitive.player_count == 1:
+		var solo_profile := String(_run_profile_ids[0]) if not _run_profile_ids.is_empty() else ""
+		_start_tower_solo(solo_profile)
+	else:
+		_start_competitive(_coop_assignments, competitive.mode, competitive.garbage_enabled)
 
 
 func cmd_open_coop_setup() -> void:
@@ -762,7 +1123,12 @@ func cmd_lobby_join_profile(slot: int, profile_id: String) -> void:
 	_coop_setup.resume_claims()
 
 
-func cmd_start_coop(assignments: Array, game_mode: int) -> void:
+func cmd_start_coop(assignments: Array, game_mode: int, garbage: bool = false) -> void:
+	## Lobby start: shared-board co-op for Marathon/Sprint, independent
+	## competitive boards for Classic Versus and multiplayer Tower.
+	if ModeRules.is_competitive(game_mode):
+		_start_competitive(assignments, game_mode, garbage)
+		return
 	_start_coop(assignments, game_mode)
 
 
@@ -877,6 +1243,50 @@ func cmd_reset_controller_bindings(profile_id: String) -> void:
 	_input.refresh_profile(profile_id)
 
 
+func cmd_profile_bind_keyboard(profile_id: String) -> void:
+	## Opens the keyboard bindings page for one profile from the profile
+	## browser; Back returns to the browser.
+	if settings.find_profile(profile_id).is_empty():
+		return
+	_settings_from_profiles = true
+	_settings_origin = HostState.MAIN_MENU
+	state = HostState.SETTINGS
+	_profile_screen.close()
+	_audio.set_music_context(true)
+	_settings_screen.open_keyboard_binding(profile_id)
+
+
+func cmd_keyboard_bindings_captured(profile_id: String, records) -> bool:
+	## Commits a whole action->records keyboard mapping to one profile
+	## atomically. The active profile's mapping is also reinstalled in the
+	## global InputMap; every profile's keyboard records are live-reloaded
+	## into the input layer's slot caches.
+	if settings.find_profile(profile_id).is_empty():
+		return false
+	if not settings.set_keyboard_bindings(profile_id, records):
+		return false
+	settings.save()
+	_apply_active_keyboard_to_input_map(profile_id)
+	_input.refresh_profile(profile_id)
+	return true
+
+
+func cmd_reset_keyboard_bindings(profile_id: String) -> void:
+	if not settings.reset_keyboard_bindings(profile_id):
+		return
+	settings.save()
+	_apply_active_keyboard_to_input_map(profile_id)
+	_input.refresh_profile(profile_id)
+
+
+func _apply_active_keyboard_to_input_map(changed_profile_id: String) -> void:
+	## Only the active profile's mapping drives the global InputMap
+	## (menus/solo); other profiles are polled per slot during play.
+	if changed_profile_id != settings.active_profile_id:
+		return
+	DefaultBindings.apply_keyboard_profile(settings.active_keyboard_bindings())
+
+
 func profile_name(profile_id: String) -> String:
 	return settings.profile_name(profile_id)
 
@@ -928,7 +1338,10 @@ func cmd_settings_back() -> void:
 			state = _settings_origin
 			_audio.set_music_active(true)
 			_audio.set_music_paused(false)
-			_show_results(_last_results["title"], _last_results["subtitle"])
+			if online_role == OnlineRole.LOCAL:
+				_show_results(_last_results["title"], _last_results["subtitle"])
+			else:
+				_menu.show_online_results(self, _last_results["title"], _last_results["subtitle"])
 		_:
 			_show_main_menu()
 
@@ -939,13 +1352,6 @@ func cmd_settings_changed() -> void:
 	settings.save()
 
 
-func cmd_keyboard_bindings_changed() -> void:
-	## The shared keyboard profile drives the global InputMap; profile
-	## controller bindings are never installed globally.
-	DefaultBindings.apply_keyboard_profile(settings.keyboard_bindings)
-	settings.save()
-
-
 func cmd_reset_all_settings() -> void:
 	_audio.stop_preview()
 	settings.reset_to_defaults()
@@ -953,7 +1359,7 @@ func cmd_reset_all_settings() -> void:
 	_audio.apply_music_settings(settings)
 	_apply_display_settings()
 	_apply_audio_settings()
-	DefaultBindings.apply_keyboard_profile(settings.keyboard_bindings)
+	DefaultBindings.apply_keyboard_profile(settings.active_keyboard_bindings())
 	themes.select_valid(settings.theme_id)
 	_apply_theme()
 	settings.save()
@@ -1114,6 +1520,8 @@ func _last_results_state() -> int:
 		return HostState.FINISHED
 	if coop != null and coop.phase == CoopGame.Phase.FINISHED:
 		return HostState.FINISHED
+	if competitive != null:
+		return HostState.FINISHED
 	return HostState.GAME_OVER
 
 
@@ -1167,8 +1575,10 @@ func _process(delta: float) -> void:
 			while _accumulator >= PlayConfig.FIXED_STEP:
 				_accumulator -= PlayConfig.FIXED_STEP
 				coop.tick(PlayConfig.FIXED_STEP)
-		# Snapshot-driven lock/level sounds still fire on clients: each
-		# host event rebuilds a fresh event object with a new instance id.
+		# Snapshot-driven lock/level sounds still fire on clients: each host
+		# event carries an authoritative revision, so an identical snapshot
+		# reapplied never replays an edge and only a revision advance
+		# (a new host event) sounds.
 		_check_coop_audio_events()
 		if online_role == OnlineRole.HOST and _online_service != null:
 			# Structural changes (lock events, phase/level transitions) are
@@ -1198,11 +1608,37 @@ func _process(delta: float) -> void:
 				_finish_online_round("FINISHED!", subtitle)
 			else:
 				_show_results("FINISHED!", subtitle)
-	if core != null or coop != null:
+	if state == HostState.PLAYING and competitive != null:
+		var capped_cmp: float = minf(delta, PlayConfig.MAX_FRAME_DELTA)
+		_accumulator += capped_cmp
+		# A client's CompetitiveGame is a host-authored twin: never ticked
+		# locally, only rebuilt from snapshots (applied in OnlineService
+		# before _sync_display below reads it).
+		if online_role != OnlineRole.CLIENT:
+			while _accumulator >= PlayConfig.FIXED_STEP:
+				_accumulator -= PlayConfig.FIXED_STEP
+				competitive.tick(PlayConfig.FIXED_STEP)
+		_check_competitive_audio_events()
+		if online_role == OnlineRole.HOST and _online_service != null:
+			var signature := _online_state_signature()
+			_online_service.host_match_frame(capped_cmp, signature != _online_signature)
+			_online_signature = signature
+		if online_role != OnlineRole.CLIENT and competitive.phase == CompetitiveGame.Phase.FINISHED:
+			state = HostState.FINISHED
+			var result_text := _competitive_finish_text()
+			if online_role == OnlineRole.HOST:
+				_finish_online_round(result_text["title"], result_text["subtitle"])
+			else:
+				_show_results(result_text["title"], result_text["subtitle"])
+	if core != null or coop != null or competitive != null:
 		_sync_display()
 
 
 func _sync_display() -> void:
+	if competitive != null:
+		_sync_competitive_display()
+		return
+	_hud.set_personal_stats_visible(true)
 	if coop != null:
 		_sync_coop_display()
 		return
@@ -1275,6 +1711,179 @@ func _sync_coop_display() -> void:
 
 static func _format_time(value: float) -> String:
 	return ModeRules.format_time(value)
+
+
+# --------------------------------------------------------- competitive view
+
+func _sync_competitive_display() -> void:
+	# Tower growth (host tick or client snapshot) changes board heights:
+	# recompute the layout whenever any board no longer matches its
+	# presented bounds so the floor stays anchored and nothing clips.
+	var heights_changed: bool = _competitive_layout_heights.size() != competitive.player_count
+	if not heights_changed:
+		for i in competitive.player_count:
+			if int(_competitive_layout_heights[i]) != competitive.players[i].board.HEIGHT:
+				heights_changed = true
+				break
+	if heights_changed:
+		_layout_competitive()
+
+	for i in competitive.player_count:
+		var renderer: Node2D = _competitive_presenters[i].installed_board()
+		renderer.session = competitive
+		renderer.cell = _competitive_presenters[i].board_size().x / float(BoardClass.DEFAULT_WIDTH)
+		renderer.queue_redraw()
+		_competitive_holds[i].set_piece(competitive.players[i].hold_kind, competitive.players[i].hold_used)
+		var previews: Array[int] = competitive.preview_kinds(i)
+		for j in _competitive_previews[i].size():
+			_competitive_previews[i][j].set_piece(previews[j])
+		_competitive_stats[i].text = _competitive_stats_text(i)
+
+	# Shared HUD: the match clock (Tower counts down), plus the latest
+	# event/combo line. Solo Tower also fills the personal stat columns;
+	# multiplayer strips carry per-player scores instead.
+	_hud.set_personal_stats_visible(competitive.player_count == 1)
+	if competitive.mode == ModeRules.Mode.TOWER:
+		_hud.set_time(competitive.time_remaining())
+	else:
+		_hud.set_time(competitive.elapsed)
+	if competitive.player_count == 1:
+		_hud.set_score(competitive.player_score(0))
+		_hud.set_level(1)
+		_hud.set_lines(competitive.players[0].lines)
+
+	if competitive.last_event_player < 0:
+		_hud.set_event("", 0)
+		_hud.set_combo("")
+		return
+	var event = competitive.players[competitive.last_event_player].last_event
+	if event == null:
+		_hud.set_event("", 0)
+		_hud.set_combo("")
+		return
+	var label: String = event.label()
+	if event.perfect_clear:
+		label = (label + "  PERFECT CLEAR") if not label.is_empty() else "PERFECT CLEAR"
+	if label.is_empty():
+		_hud.set_event("", 0)
+		_hud.set_combo("")
+	else:
+		_hud.set_event("P%d  %s" % [competitive.last_event_player + 1, label], event.total_points)
+		_hud.set_combo(("COMBO x%d" % event.combo) if event.combo >= 1 else "")
+
+
+## Per-player strip status: score plus the mode's headline metric (Tower
+## height / Versus garbage queue), or the elimination state.
+func _competitive_stats_text(player: int) -> String:
+	if competitive.is_eliminated(player):
+		return "OUT - %d" % competitive.player_score(player)
+	var text := "SCORE %d" % competitive.player_score(player)
+	if competitive.mode == ModeRules.Mode.TOWER:
+		text += "  -  HEIGHT %d" % competitive.player_height(player)
+	elif competitive.garbage_enabled:
+		var pending: int = competitive.pending_garbage(player)
+		if pending > 0:
+			text += "  -  GARBAGE %d" % pending
+	return text
+
+
+## Terminal overlay text for a finished competitive match; records
+## persistable results exactly once on the way through.
+func _competitive_finish_text() -> Dictionary:
+	var result: Dictionary = competitive.match_result()
+	if result.is_empty():
+		return {"title": "GAME OVER", "subtitle": ""}
+	if competitive.player_count == 1:
+		var suffix := _record_tower_solo_result(result)
+		return {
+			"title": "TIME!",
+			"subtitle": "Height %d - Score %d%s" % [int(result["players"][0]["height"]), int(result["players"][0]["score"]), suffix],
+		}
+	var title := "DRAW!"
+	if result["winners"].size() == 1:
+		title = "%s WINS!" % _competitive_player_name(int(result["winners"][0])).to_upper()
+	var mode_name: String = ModeRules.mode_display_name(competitive.mode)
+	var subtitle := "%s - %dP" % [mode_name, competitive.player_count]
+	if competitive.mode == ModeRules.Mode.CLASSIC_VERSUS:
+		subtitle += " - GARBAGE %s" % ("ON" if competitive.garbage_enabled else "OFF")
+	if result["winners"].size() == 1 and competitive.mode == ModeRules.Mode.TOWER:
+		var winner: int = int(result["winners"][0])
+		subtitle += " - HEIGHT %d" % int(result["players"][winner]["height"])
+	_record_competitive_match_results(result)
+	return {"title": title, "subtitle": subtitle}
+
+
+# ---------------------------------------------------------- result recording
+
+func _record_tower_solo_result(result: Dictionary) -> String:
+	## Solo Tower goes to the dedicated height-then-score leaderboard; the
+	## returned suffix mirrors the solo Marathon personal-best feedback.
+	if _run_result_recorded:
+		return ""
+	_run_result_recorded = true
+	if _run_profile_ids.is_empty():
+		return ""
+	var summary: Dictionary = result["players"][0]
+	var record := {
+		"score": maxi(0, int(summary["score"])),
+		"elapsed": float(result["duration"]),
+		"completed_at": int(Time.get_unix_time_from_system()),
+		"players": 1,
+		"mode": ModeRules.mode_key(ModeRules.Mode.TOWER, false),
+		"height": maxi(0, int(summary["height"])),
+	}
+	var placement := 0
+	var had_records := false
+	for profile_id in _run_profile_ids:
+		if not settings.profile_history(profile_id, "solo_tower").is_empty():
+			had_records = true
+		var place: int = settings.append_result(profile_id, "solo_tower", record, false)
+		if place > 0:
+			placement = place
+	settings.save()
+	if placement <= 0:
+		return ""
+	if placement == 1:
+		return " - NEW PERSONAL BEST!" if had_records else ""
+	var history: Array = settings.profile_history(String(_run_profile_ids[0]), "solo_tower")
+	if history.is_empty():
+		return ""
+	var best: Dictionary = history[0]
+	return " - Best H%d %d (this run #%d)" % [int(best["height"]), int(best["score"]), placement]
+
+
+func _record_competitive_match_results(result: Dictionary) -> void:
+	## Multiplayer outcomes append one match record to every participating
+	## profile (draws carry placement 0). Online runs track no local
+	## profiles and record nothing, exactly like online co-op.
+	if _run_result_recorded:
+		return
+	_run_result_recorded = true
+	if _run_profile_ids.is_empty():
+		return
+	var placements: Array = result["placements"]
+	var players: Array = result["players"]
+	for i in _run_profile_ids.size():
+		var profile_id := String(_run_profile_ids[i])
+		if settings.find_profile(profile_id).is_empty():
+			continue
+		var player_index: int = mini(i, players.size() - 1)
+		var summary: Dictionary = players[player_index]
+		var won: bool = result["winners"].size() == 1 and result["winners"].has(player_index)
+		var draw: bool = result["winners"].size() > 1 and result["winners"].has(player_index)
+		settings.append_match_result(profile_id, {
+			"mode": ModeRules.match_mode_key(competitive.mode),
+			"placement": int(placements[player_index]) if placements.size() == competitive.player_count else 0,
+			"won": won,
+			"draw": draw,
+			"score": maxi(0, int(summary["score"])),
+			"height": maxi(0, int(summary["height"])),
+			"duration": float(result["duration"]),
+			"players": competitive.player_count,
+			"garbage": competitive.garbage_enabled,
+			"completed_at": int(Time.get_unix_time_from_system()),
+		})
+	settings.save()
 
 
 # -------------------------------------------------------- result recording
@@ -1360,6 +1969,8 @@ func is_gameplay_input_enabled() -> bool:
 
 
 func action_move(dir: int) -> bool:
+	if competitive != null:
+		return _competitive_move(0, dir)
 	if not is_playing() or core == null:
 		return false
 	if core.try_move(dir):
@@ -1377,6 +1988,9 @@ func action_rotate_ccw() -> void:
 
 
 func _rotate(dir: int) -> void:
+	if competitive != null:
+		_competitive_rotate(0, dir)
+		return
 	if is_playing() and core != null and core.rotate(dir):
 		_audio.play_sfx("rotate")
 
@@ -1386,6 +2000,13 @@ func action_soft_drop(active: bool) -> void:
 	# caller can produce a sound per held frame.
 	var was: bool = _solo_soft_drop_active
 	_solo_soft_drop_active = active
+	if competitive != null:
+		var was_cmp := false
+		if not _competitive_soft_drop_active.is_empty():
+			was_cmp = _competitive_soft_drop_active[0]
+			_competitive_soft_drop_active[0] = active
+		_competitive_soft_drop(0, active, was_cmp)
+		return
 	if not (is_playing() and core != null):
 		return
 	core.set_soft_drop(active)
@@ -1394,6 +2015,9 @@ func action_soft_drop(active: bool) -> void:
 
 
 func action_hard_drop() -> void:
+	if competitive != null:
+		_competitive_hard_drop(0)
+		return
 	if is_playing() and core != null:
 		if core.hard_drop():
 			_audio.play_sfx("hard_drop")
@@ -1402,6 +2026,9 @@ func action_hard_drop() -> void:
 
 
 func action_hold() -> void:
+	if competitive != null:
+		_competitive_hold(0)
+		return
 	if is_playing() and core != null and core.hold():
 		_audio.play_sfx("hold")
 
@@ -1427,6 +2054,8 @@ func _online_submit(player: int, action: String, arg: int) -> bool:
 
 
 func action_coop_move(player: int, dir: int) -> bool:
+	if competitive != null:
+		return _competitive_move(player, dir)
 	if not is_playing() or coop == null:
 		return false
 	if _online_slot_guard(player):
@@ -1443,6 +2072,9 @@ func action_coop_move(player: int, dir: int) -> bool:
 
 
 func action_coop_rotate(player: int, dir: int) -> void:
+	if competitive != null:
+		_competitive_rotate(player, dir)
+		return
 	if not is_playing() or coop == null:
 		return
 	if _online_slot_guard(player):
@@ -1455,6 +2087,13 @@ func action_coop_rotate(player: int, dir: int) -> void:
 
 
 func action_coop_soft_drop(player: int, active: bool) -> void:
+	if competitive != null:
+		var was_cmp := false
+		if player >= 0 and player < _competitive_soft_drop_active.size():
+			was_cmp = _competitive_soft_drop_active[player]
+			_competitive_soft_drop_active[player] = active
+		_competitive_soft_drop(player, active, was_cmp)
+		return
 	var was := false
 	if player >= 0 and player < _coop_soft_drop_active.size():
 		was = _coop_soft_drop_active[player]
@@ -1473,6 +2112,9 @@ func action_coop_soft_drop(player: int, active: bool) -> void:
 
 
 func action_coop_hard_drop(player: int) -> void:
+	if competitive != null:
+		_competitive_hard_drop(player)
+		return
 	if not (is_playing() and coop != null):
 		return
 	if _online_slot_guard(player):
@@ -1486,6 +2128,9 @@ func action_coop_hard_drop(player: int) -> void:
 
 
 func action_coop_hold(player: int) -> void:
+	if competitive != null:
+		_competitive_hold(player)
+		return
 	if not (is_playing() and coop != null):
 		return
 	if _online_slot_guard(player):
@@ -1494,6 +2139,77 @@ func action_coop_hold(player: int) -> void:
 		_audio.play_sfx("hold")
 		return
 	if coop.hold(player):
+		_audio.play_sfx("hold")
+
+
+# Competitive variants: player-indexed actions against the independent
+# boards, with the same online ownership/intent split as coop. Solo Tower
+# reuses these with player 0 through the solo action methods above.
+
+func _competitive_move(player: int, dir: int) -> bool:
+	if not is_playing() or competitive == null:
+		return false
+	if player < 0 or player >= competitive.player_count:
+		return false
+	if _online_slot_guard(player):
+		return false
+	if _online_submit(player, "move", dir):
+		_audio.play_sfx("move")
+		return false
+	if competitive.try_move(player, dir):
+		_audio.play_sfx("move")
+		return true
+	return false
+
+
+func _competitive_rotate(player: int, dir: int) -> void:
+	if not is_playing() or competitive == null:
+		return
+	if _online_slot_guard(player):
+		return
+	if _online_submit(player, "rotate", dir):
+		_audio.play_sfx("rotate")
+		return
+	if competitive.rotate(player, dir):
+		_audio.play_sfx("rotate")
+
+
+func _competitive_soft_drop(player: int, active: bool, was: bool) -> void:
+	if not (is_playing() and competitive != null):
+		return
+	if _online_slot_guard(player):
+		return
+	if _online_submit(player, "soft_drop", 1 if active else 0):
+		if active and not was:
+			_audio.play_sfx("soft_drop")
+		return
+	competitive.set_soft_drop(player, active)
+	if active and not was:
+		_audio.play_sfx("soft_drop")
+
+
+func _competitive_hard_drop(player: int) -> void:
+	if not (is_playing() and competitive != null):
+		return
+	if _online_slot_guard(player):
+		return
+	if _online_submit(player, "hard_drop", 0):
+		_audio.play_sfx("hard_drop")
+		return
+	if competitive.hard_drop(player):
+		_audio.play_sfx("hard_drop")
+	_check_competitive_audio_events(true)
+
+
+func _competitive_hold(player: int) -> void:
+	if not (is_playing() and competitive != null):
+		return
+	if _online_slot_guard(player):
+		return
+	if _online_submit(player, "hold", 0):
+		_audio.play_sfx("hold")
+		return
+	if competitive.hold(player):
 		_audio.play_sfx("hold")
 
 
@@ -1527,12 +2243,32 @@ func input_coop_profile_bindings(player: int) -> Dictionary:
 	return _input.coop_profile_bindings(player)
 
 
+func input_coop_keyboard_bindings(player: int) -> Dictionary:
+	# Test/inspection helper: the keyboard bindings polled for a slot.
+	return _input.coop_keyboard_bindings(player)
+
+
+func input_controller() -> Node:
+	# Test/inspection helper: the input layer (shell tests drive its
+	# event/polling internals directly).
+	return _input
+
+
 func input_process_once(delta: float) -> void:
 	# Test/inspection helper: drive one input polling step headlessly.
 	_input._process(delta)
 
 
 func action_pause() -> void:
+	# Online pause is host-authoritative and global: the host's pause key
+	# toggles the authoritative state (broadcast + structural snapshot);
+	# client keys are ignored so they can never locally pause the
+	# remote-authoritative run.
+	if online_role == OnlineRole.CLIENT:
+		return
+	if online_role == OnlineRole.HOST and state in [HostState.PLAYING, HostState.PAUSED]:
+		_online_host_pause_toggle()
+		return
 	match state:
 		HostState.PLAYING:
 			_audio.play_sfx("pause")
@@ -1544,14 +2280,71 @@ func action_pause() -> void:
 			_pause_menu.close()
 			_audio.set_music_paused(false)
 		HostState.GAME_OVER, HostState.FINISHED:
-			_show_main_menu()
+			if online_role == OnlineRole.LOCAL:
+				_show_main_menu()
+
+
+## Host: flip the authoritative pause state and replicate it to every peer
+## immediately - state change, held-input release, the pause envelope, and a
+## structural snapshot carrying the same revision.
+func _online_host_pause_toggle() -> void:
+	if online_role != OnlineRole.HOST or _online_service == null:
+		return
+	var paused: bool = not _online_paused
+	_online_paused = paused
+	_pause_revision += 1
+	_input.release_all()
+	if paused:
+		_audio.play_sfx("pause")
+		state = HostState.PAUSED
+		_pause_menu.show_pause()
+		_audio.set_music_paused(true)
+	else:
+		state = HostState.PLAYING
+		_pause_menu.close()
+		_audio.set_music_paused(false)
+	_online_service.broadcast_pause_state(paused, _pause_revision)
+	_online_service.send_snapshot(true)
+
+
+## Service hook (client): apply a host pause/resume state idempotently by
+## revision. A stale message or snapshot can never reopen input after a
+## newer pause, and passive client pause never offers local menu control -
+## only the host resumes the match.
+func online_set_paused(paused: bool, rev: int) -> void:
+	if online_role != OnlineRole.CLIENT:
+		return
+	if coop == null and competitive == null:
+		return
+	if state != HostState.PLAYING and state != HostState.PAUSED:
+		return
+	if rev < _pause_revision:
+		return  # stale: an older revision never overwrites a newer state
+	if rev == _pause_revision and paused == _online_paused:
+		return  # duplicate: already applied
+	_online_paused = paused
+	_pause_revision = rev
+	_render_samples = {}
+	_push_online_render_sample()
+	if paused:
+		_audio.play_sfx("pause")
+		state = HostState.PAUSED
+		_input.release_all()
+		_pause_menu.show_remote_pause()
+		_audio.set_music_paused(true)
+	else:
+		state = HostState.PLAYING
+		_pause_menu.close()
+		_audio.set_music_paused(false)
 
 
 func action_restart() -> void:
 	if online_role != OnlineRole.LOCAL:
 		# Online: the shared restart key never resets a networked round.
 		return
-	if coop != null and state in [HostState.PLAYING, HostState.PAUSED, HostState.GAME_OVER, HostState.FINISHED]:
+	if competitive != null and state in [HostState.PLAYING, HostState.PAUSED, HostState.GAME_OVER, HostState.FINISHED]:
+		_restart_competitive()
+	elif coop != null and state in [HostState.PLAYING, HostState.PAUSED, HostState.GAME_OVER, HostState.FINISHED]:
 		_start_coop(_coop_assignments, coop.mode)
 	elif core != null and state in [HostState.PLAYING, HostState.PAUSED, HostState.GAME_OVER, HostState.FINISHED]:
 		var solo_profile := String(_run_profile_ids[0]) if not _run_profile_ids.is_empty() else ""
@@ -1559,12 +2352,17 @@ func action_restart() -> void:
 
 
 func auto_pause_on_focus_loss() -> void:
+	## Focus loss during online client play never creates a local pause: the
+	## host alone owns match-state transitions. Held input is already
+	## released by the caller.
+	if is_online_client():
+		return
 	if state == HostState.PLAYING:
 		action_pause()
 
 
 # ------------------------------------------------------------------- online
-# Relay-backed online co-op (see scripts/online/ and relay/). GameHost
+# Relay-backed online multiplayer (see scripts/online/ and relay/). GameHost
 # remains the orchestration boundary: UI calls the cmd_* commands below,
 # which delegate to the OnlineService autoload; the service calls back
 # into the hooks in this section. The authoritative CoopGame lives on
@@ -1578,6 +2376,13 @@ func online_is_local() -> bool:
 
 func online_is_host() -> bool:
 	return online_role == OnlineRole.HOST
+
+
+func is_online_client() -> bool:
+	## True while this host renders a remote-authoritative online match:
+	## input layers use it to keep pause/restart from ever locally
+	## transitioning the run.
+	return online_role == OnlineRole.CLIENT
 
 
 ## The OnlineService autoload reference (read access for UI polling).
@@ -1666,11 +2471,20 @@ func cmd_online_mode_prev() -> void:
 		_online_service.set_mode(_online_mode_after(-1))
 
 
+func cmd_online_toggle_garbage() -> void:
+	## Host-only Versus garbage switch in the online lobby.
+	if _online_service != null:
+		_online_service.set_garbage(not bool(_online_service.lobby_garbage))
+
+
 func _online_mode_after(delta: int) -> int:
-	## Cycle the shared lobby mode across the playable co-op modes.
+	## Cycle the shared lobby mode across every playable lobby mode:
+	## shared-board co-op plus the competitive modes.
 	var modes: Array = [
 		ModeRules.Mode.MARATHON,
 		ModeRules.Mode.SPRINT,
+		ModeRules.Mode.CLASSIC_VERSUS,
+		ModeRules.Mode.TOWER,
 	]
 	var current: int = _online_service.lobby_mode
 	var idx := modes.find(current)
@@ -1690,10 +2504,14 @@ func cmd_online_start_round() -> void:
 
 
 func cmd_online_return_to_lobby() -> void:
-	## Host results action: send everyone back to the lobby.
+	## Result action: hosts broadcast the return; clients close their own
+	## result overlay without changing room authority.
 	if _online_service == null:
 		return
-	_online_service.host_return_to_lobby()
+	if online_is_host():
+		_online_service.host_return_to_lobby()
+	else:
+		_online_service.client_return_to_lobby()
 
 
 # ------------------------------------------------------- service callbacks
@@ -1716,14 +2534,34 @@ func _begin_online_run(config: Dictionary, role: int, own_slot: int) -> void:
 	if own_slot < 0 or own_slot >= player_count:
 		push_error("host: online run rejected - own slot %d invalid for %d players" % [own_slot, player_count])
 		return
+	var garbage := bool(config.get("garbage", false))
+	var competitive_mode: bool = ModeRules.is_competitive(mode)
+	if competitive_mode and not ModeRules.valid_competitive_match(mode, player_count, garbage):
+		# Malformed/old competitive configuration: fail closed instead of
+		# desyncing into a match nobody agreed on.
+		push_error("online: rejected match config - mode %d invalid for %d players (garbage %s)" % [mode, player_count, garbage])
+		return
 	core = null
+	coop = null
 	_teardown_coop_scene()
-	coop = CoopGame.new(player_count, mode, seed)
+	_teardown_competitive_scene()
+	if competitive_mode:
+		competitive = CompetitiveGame.new(mode, seed, player_count, garbage)
+	else:
+		competitive = null
+		coop = CoopGame.new(player_count, mode, seed)
 	state = HostState.PLAYING
 	online_role = role
 	_online_slot = own_slot
 	_accumulator = 0.0
-	_reset_coop_audio_edges()
+	_online_paused = false
+	_pause_revision = 0
+	_online_last_tick = -1
+	_render_samples = {}
+	if competitive != null:
+		_reset_competitive_audio_edges()
+	else:
+		_reset_coop_audio_edges()
 	_hud.set_combo("")
 	_hud.set_event("", 0)
 	_coop_assignments = _online_roster_assignments(config.get("roster", []))
@@ -1733,7 +2571,10 @@ func _begin_online_run(config: Dictionary, role: int, own_slot: int) -> void:
 	_run_result_recorded = true
 	var own_profile := String(settings.active_profile_id) if settings != null else ""
 	_input.begin_online(own_slot, player_count, own_profile, _first_connected_device())
-	_build_coop_scene()
+	if competitive != null:
+		_build_competitive_scene()
+	else:
+		_build_coop_scene()
 	_menu.close()
 	_coop_setup.close()
 	_pause_menu.close()
@@ -1767,7 +2608,21 @@ func _online_roster_assignments(roster) -> Array:
 
 func _online_state_signature() -> int:
 	## Cheap structural change detector: phase, last event, and level cover
-	## every lock/clear/transition the reliable snapshot stream cares about.
+	## every lock/clear/transition the reliable snapshot stream cares
+	## about; competitive matches additionally key on eliminations and the
+	## finish ranking so wins/draws/garbage waves always arrive reliably.
+	if competitive != null:
+		var eliminated: int = 0
+		for p in competitive.players:
+			if p.eliminated:
+				eliminated += 1
+		return hash("%d|%d|%d|%d|%d" % [
+			competitive.phase,
+			competitive.last_event_player,
+			_event_id(_competitive_last_event()),
+			eliminated,
+			competitive.players[0].board.HEIGHT,
+		])
 	if coop == null:
 		return -1
 	var event_id := _event_id(_coop_last_event())
@@ -1778,27 +2633,47 @@ func _online_teardown_run() -> void:
 	## Drop the run (any role) and clear online bookkeeping.
 	online_role = OnlineRole.LOCAL
 	_online_slot = -1
+	_online_paused = false
+	_pause_revision = 0
+	_online_last_tick = -1
+	_render_samples = {}
 	core = null
 	coop = null
-	_input.end_coop()
+	competitive = null
+	_input.reset_online_session()
 	_teardown_coop_scene()
+	_teardown_competitive_scene()
 	_run_profile_ids = []
 	_run_result_recorded = true
 	state = HostState.MAIN_MENU
+	_audio.set_music_paused(false)
 	_hud.hide_overlay()
 	_hud.set_combo("")
 	_hud.set_event("", 0)
 
 
 func online_snapshot() -> Dictionary:
-	## Service hook: capture the authoritative state (host only).
-	if coop == null:
+	## Service hook: capture the authoritative state (host only). The
+	## authoritative pause/revision state travels with every snapshot so
+	## clients can order pause/resume against world state monotonically.
+	var snapshot: Dictionary = {}
+	if competitive != null:
+		snapshot = competitive.to_snapshot()
+	elif coop != null:
+		snapshot = coop.to_snapshot()
+	else:
 		return {}
-	return coop.to_snapshot()
+	snapshot["paused"] = _online_paused
+	snapshot["pause_rev"] = _pause_revision
+	return snapshot
 
 
 func online_phase_active() -> bool:
-	## Service hook: gate inbound intents to the ACTIVE phase only.
+	## Service hook: gate inbound intents to the ACTIVE phase only (the
+	## authoritative paused state rejects client intents without poisoning
+	## their sequence state).
+	if competitive != null:
+		return competitive.phase == CompetitiveGame.Phase.ACTIVE and state == HostState.PLAYING
 	return coop != null and coop.phase == CoopGame.Phase.ACTIVE and state == HostState.PLAYING
 
 
@@ -1806,7 +2681,29 @@ func online_apply_intent(slot: int, action: String, arg: int) -> void:
 	## Service hook: apply one fully validated client intent to the
 	## authoritative simulation. Sounds play host-side so remote actions
 	## are audible like local ones.
-	if online_role != OnlineRole.HOST or coop == null:
+	if online_role != OnlineRole.HOST:
+		return
+	if competitive != null:
+		if slot < 0 or slot >= competitive.player_count:
+			return
+		match action:
+			"move":
+				if competitive.try_move(slot, arg):
+					_audio.play_sfx("move")
+			"rotate":
+				if competitive.rotate(slot, arg):
+					_audio.play_sfx("rotate")
+			"soft_drop":
+				competitive.set_soft_drop(slot, arg != 0)
+			"hard_drop":
+				if competitive.hard_drop(slot):
+					_audio.play_sfx("hard_drop")
+				_check_competitive_audio_events(true)
+			"hold":
+				if competitive.hold(slot):
+					_audio.play_sfx("hold")
+		return
+	if coop == null:
 		return
 	if slot < 0 or slot >= coop.player_count:
 		return
@@ -1830,11 +2727,102 @@ func online_apply_intent(slot: int, action: String, arg: int) -> void:
 
 func online_apply_snapshot(snapshot) -> void:
 	## Service hook (client): replace the twin simulation's state with the
-	## host's snapshot. The normal _sync_display pass renders it read-only.
-	if online_role != OnlineRole.CLIENT or coop == null:
+	## host's snapshot. Snapshots older than the newest applied tick cannot
+	## regress the twin; the pause/revision state riding the snapshot is
+	## applied idempotently by revision. The normal _sync_display pass
+	## renders the twin read-only and rebuilds presenters when Tower
+	## geometry changed on the host.
+	if online_role != OnlineRole.CLIENT:
 		return
-	if snapshot is Dictionary:
-		coop.apply_snapshot(snapshot)
+	if not (snapshot is Dictionary):
+		return
+	var snap: Dictionary = snapshot
+	var tick := int(snap.get("tick", -1))
+	if tick < _online_last_tick:
+		return  # stale world state never regresses the twin
+	online_set_paused(bool(snap.get("paused", false)), int(snap.get("pause_rev", 0)))
+	var applied: bool = false
+	if competitive != null:
+		applied = competitive.apply_snapshot(snap)
+	elif coop != null:
+		applied = coop.apply_snapshot(snap)
+	if not applied:
+		return
+	_online_last_tick = tick
+	_record_online_render_sample()
+
+
+## One authoritative render sample per applied snapshot: the previous and
+## current per-player piece positions plus receive timestamps. Board
+## renderers interpolate movement between the two (presentation-only;
+## every gameplay decision stays snapped to the current state).
+func _record_online_render_sample() -> void:
+	var positions := {}
+	if competitive != null:
+		for p in competitive.players:
+			if not p.eliminated:
+				positions[p.index] = _piece_sample(p)
+	elif coop != null:
+		for p in coop.players:
+			positions[p.index] = _piece_sample(p)
+	var now := float(Time.get_ticks_msec())
+	var elapsed_now := _online_twin_elapsed()
+	var previous: Dictionary = _render_samples.get("cur", {})
+	var snap_all: bool = _render_samples.is_empty() or not _samples_compatible(previous, positions)
+	_render_samples = {
+		"t0": now,
+		"t1": now + ONLINE_RENDER_CATCHUP_MS,
+		"snap_all": snap_all,
+		"prev": previous,
+		"cur": positions,
+		"elapsed_prev": float(_render_samples.get("elapsed_cur", elapsed_now)),
+		"elapsed_cur": elapsed_now,
+	}
+	_push_online_render_sample()
+
+
+func _push_online_render_sample() -> void:
+	## Publish the latest render sample to the active board renderers; the
+	## normal _sync_display pass redraws them with fresh alpha each frame.
+	if _coop_renderer != null:
+		_coop_renderer.interpolation = _render_samples
+	for renderer in _competitive_renderers:
+		renderer.interpolation = _render_samples
+
+
+func _online_twin_elapsed() -> float:
+	if competitive != null:
+		return competitive.elapsed
+	if coop != null:
+		return coop.elapsed
+	return 0.0
+
+
+func _piece_sample(p) -> Dictionary:
+	## Piece identity for interpolation compatibility: only position
+	## interpolates; a changed kind/state (rotation/new piece) snaps.
+	return {"x": p.piece_x, "y": p.piece_y, "kind": p.piece_kind, "state": p.piece_state}
+
+
+func _samples_compatible(previous: Dictionary, current: Dictionary) -> bool:
+	## True when every current piece existed with the same identity in the
+	## previous sample; any rotation or new piece snaps the whole frame.
+	if previous.is_empty() or previous.size() != current.size():
+		return false
+	for slot in current:
+		if not previous.has(slot):
+			return false
+		var a: Dictionary = previous[slot]
+		var b: Dictionary = current[slot]
+		if a.get("kind") != b.get("kind") or a.get("state") != b.get("state"):
+			return false
+	return true
+
+
+## Latest render sample (test/inspection hook): previous/current piece
+## samples with receive timestamps, or {} while rendering live state.
+func online_render_sample() -> Dictionary:
+	return _render_samples.duplicate(true)
 
 
 func online_show_results(result: Dictionary) -> void:
@@ -1842,11 +2830,11 @@ func online_show_results(result: Dictionary) -> void:
 	## overlay with online items (host drives the return to the lobby).
 	if online_role == OnlineRole.LOCAL:
 		return
-	_online_teardown_run()
 	_last_results = {
 		"title": String(result.get("title", "GAME OVER")),
 		"subtitle": String(result.get("subtitle", "")),
 	}
+	state = _last_results_state()
 	_menu.show_online_results(
 		self,
 		String(result.get("title", "GAME OVER")),
@@ -1901,9 +2889,11 @@ func online_session_error(_text: String) -> void:
 
 
 # ---------------------------------------------------------- gameplay sfx
-# Edge-triggered observation of the pure cores: every lock produces a new
-# last_event object, and phase/level changes are compared against the
-# previous frame, so each sound fires exactly once per event.
+# Edge-triggered observation of the pure cores: every lock event carries an
+# authoritative revision (stable across snapshot rebuilds on clients, so
+# applying the same or newer snapshots never replays a sound), and
+# phase/level changes are compared against the previous frame, so each
+# sound fires exactly once per host event.
 
 func _reset_solo_audio_edges() -> void:
 	_solo_event_id = _event_id(core.last_event)
@@ -1920,6 +2910,46 @@ func _reset_coop_audio_edges() -> void:
 	_coop_soft_drop_active = []
 	for i in coop.player_count:
 		_coop_soft_drop_active.append(false)
+
+
+func _reset_competitive_audio_edges() -> void:
+	_competitive_event_id = _event_id(_competitive_last_event())
+	_competitive_event_player = competitive.last_event_player
+	_competitive_prev_phase = competitive.phase
+	_competitive_prev_eliminated = []
+	_competitive_soft_drop_active = []
+	for i in competitive.player_count:
+		_competitive_prev_eliminated.append(false)
+		_competitive_soft_drop_active.append(false)
+
+
+func _check_competitive_audio_events(suppress_lock: bool = false) -> void:
+	if competitive == null or _audio == null:
+		return
+	var player: int = competitive.last_event_player
+	if player >= 0:
+		var event = competitive.players[player].last_event
+		var event_id := _event_id(event)
+		if event != null and (player != _competitive_event_player or event_id != _competitive_event_id):
+			_competitive_event_player = player
+			_competitive_event_id = event_id
+			_emit_lock_sounds(event, suppress_lock)
+	# Eliminations fire their own downer: one sound per player, once.
+	for i in competitive.player_count:
+		var eliminated_now: bool = competitive.players[i].eliminated
+		if eliminated_now and not bool(_competitive_prev_eliminated[i]):
+			_audio.play_sfx("game_over")
+		_competitive_prev_eliminated[i] = eliminated_now
+	if competitive.phase != _competitive_prev_phase:
+		if competitive.phase == CompetitiveGame.Phase.FINISHED:
+			_audio.play_sfx("finish")
+	_competitive_prev_phase = competitive.phase
+
+
+func _competitive_last_event():
+	if competitive == null or competitive.last_event_player < 0:
+		return null
+	return competitive.players[competitive.last_event_player].last_event
 
 
 func _check_solo_audio_events(suppress_lock: bool = false) -> void:
@@ -1971,7 +3001,9 @@ func _emit_lock_sounds(event, suppress_lock: bool) -> void:
 		_audio.play_sfx("tspin")
 	elif event.lines >= 1:
 		_audio.play_sfx("line_clear")
-	elif not suppress_lock:
+	elif not suppress_lock and not event.hard_drop:
+		# A hard-drop lock already played its drop sound (locally or
+		# optimistically on clients); never layer the plain lock on top.
 		_audio.play_sfx("lock")
 
 
@@ -1982,6 +3014,9 @@ func _coop_last_event():
 
 
 static func _event_id(event) -> int:
+	## Stable identity of one lock event: the engine-assigned revision,
+	## never the object instance (a snapshot-rebuilt twin event must
+	## compare equal to the host event it represents).
 	if event == null:
 		return 0
-	return event.get_instance_id()
+	return int(event.rev)

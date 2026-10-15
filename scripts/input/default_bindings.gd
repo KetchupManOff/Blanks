@@ -293,6 +293,33 @@ static func device_action_pressed(device: int, records: Array) -> bool:
 	return false
 
 
+# ------------------------------------------------------ keyboard polling
+
+## True when the live keyboard state satisfies this record: the physical
+## key is held with exactly the recorded modifier state. Local
+## multiplayer and online play poll profile keyboard records this way;
+## solo and menus use the global InputMap instead.
+static func keyboard_record_held(record: Dictionary) -> bool:
+	var code := _as_int(record.get("code"))
+	if code <= 0:
+		return false
+	if not Input.is_physical_key_pressed(code):
+		return false
+	return (
+		Input.is_key_pressed(KEY_CTRL) == bool(record.get("ctrl", false))
+		and Input.is_key_pressed(KEY_ALT) == bool(record.get("alt", false))
+		and Input.is_key_pressed(KEY_SHIFT) == bool(record.get("shift", false))
+	)
+
+
+## True when any record of the action is currently held on the keyboard.
+static func keyboard_action_held(profile: Dictionary, action: String) -> bool:
+	for record in profile.get(action, []):
+		if keyboard_record_held(record):
+			return true
+	return false
+
+
 static func action_for_record(profile: Dictionary, record: Dictionary) -> String:
 	## Which canonical action (if any) this controller record is bound to
 	## inside the profile, in ACTION_NAMES order.
@@ -304,7 +331,8 @@ static func action_for_record(profile: Dictionary, record: Dictionary) -> String
 
 
 static func apply_keyboard_profile(profile) -> void:
-	## Rebuilds the InputMap from the shared keyboard profile only.
+	## Rebuilds the InputMap from one profile's keyboard mapping only (the
+	## active profile: the single keyboard owner for menus and solo play).
 	## Controller records are never installed globally: they are polled per
 	## assigned device so several profiles can coexist.
 	var sanitized := sanitize_category_profile(profile, "keyboard")

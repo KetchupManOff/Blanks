@@ -1,12 +1,12 @@
 extends CanvasLayer
 ## Settings screen: category-based layout (Controls / Display / Audio /
-## Reset) with a bounded, windowed row list; the shared keyboard bindings
-## page with live keyboard capture; the guided controller rebinding flow
-## (3-second pad claim, then one capture per canonical action, review,
-## commit); playlist editor; theme selection/reload; and resets. All
-## changes are committed through host commands so the host stays the
-## orchestration boundary. Visual values come from the resolved theme
-## tokens.
+## Reset) with a bounded, windowed row list; the profile-targeted keyboard
+## bindings page with live keyboard capture; the guided controller
+## rebinding flow (3-second pad claim, then one capture per canonical
+## action, review, commit); playlist editor; theme selection/reload; and
+## resets. All changes are committed through host commands so the host
+## stays the orchestration boundary. Visual values come from the resolved
+## theme tokens.
 
 const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const BindingCapture = preload("res://scripts/ui/binding_capture.gd")
@@ -80,6 +80,12 @@ var _pad_device: int = -1
 var _pad_stage: String = PAD_STAGE_IDLE
 var _pad_index: int = 0
 var _pad_captured: Dictionary = {}
+
+# --- Profile-targeted keyboard bindings page state ---
+# The page edits one profile's keyboard mapping through a working copy;
+# every mutation commits atomically through the host command.
+var _kb_profile_id: String = ""
+var _kb_profile: Dictionary = {}
 
 
 func _ready() -> void:
@@ -216,7 +222,7 @@ func _refresh_title() -> void:
 			_title.text = "SETTINGS"
 			_status.text = "A / Enter: change    D-pad / Left-Right: adjust    B / Esc: back"
 		"kb":
-			_title.text = "KEYBOARD BINDINGS"
+			_title.text = "KEYBOARD BINDINGS - %s" % _host.profile_name(_kb_profile_id).to_upper()
 			_status.text = "Enter: change    Left/Right: adjust or reset    Esc: back"
 		"padbind":
 			_title.text = "CONTROLLER BINDINGS"
@@ -233,7 +239,7 @@ func _build_rows() -> Array:
 	match _mode:
 		"controls":
 			rows.append(_category_row())
-			rows.append(_command("keyboard", "Keyboard Bindings"))
+			rows.append(_command("keyboard", "Keyboard Bindings (%s)" % _host.active_profile_name()))
 			rows.append(_command("controller", "Controller Bindings (%s)" % _host.active_profile_name()))
 			rows.append(_command("back", "Back"))
 		"display":
@@ -261,11 +267,12 @@ func _build_rows() -> Array:
 			rows.append(_command("back", "Back"))
 		"reset":
 			rows.append(_category_row())
-			rows.append(_command("reset_kb", "Reset Keyboard Bindings"))
+			rows.append(_command("reset_kb", "Reset Keyboard Bindings (%s)" % _host.active_profile_name()))
 			rows.append(_command("reset_pad", "Reset Controller Bindings (%s)" % _host.active_profile_name()))
 			rows.append(_command("reset_all", "Reset All Settings"))
 			rows.append(_command("back", "Back"))
 		"kb":
+			rows.append(_header("PROFILE: %s" % _host.profile_name(_kb_profile_id).to_upper()))
 			for action in DefaultBindings.ACTION_NAMES:
 				rows.append(_binding(action))
 			rows.append(_command("reset_list", "Reset This List To Defaults"))
@@ -697,9 +704,7 @@ func _run_command(id: String) -> void:
 		_play_nav_sfx("menu_confirm")
 	match id:
 		"keyboard":
-			_mode = "kb"
-			_selected = 0
-			_rebuild()
+			open_keyboard_binding(_host.settings.active_profile_id)
 		"controller":
 			open_controller_binding(_host.settings.active_profile_id)
 		"themes_reload":
@@ -730,8 +735,9 @@ func _run_command(id: String) -> void:
 			_selected = 0
 			_rebuild()
 		"reset_kb":
-			_reset_category("keyboard")
-			_status.text = "Keyboard bindings reset"
+			_host.cmd_reset_keyboard_bindings(_host.settings.active_profile_id)
+			_status.text = "Keyboard bindings reset for %s" % _host.active_profile_name()
+			_render_rows()
 		"reset_pad":
 			_host.cmd_reset_controller_bindings(_host.settings.active_profile_id)
 			_status.text = "Controller bindings reset"
@@ -777,7 +783,7 @@ func _back() -> void:
 # ----------------------------------------------------- guided controller flow
 
 ## Opens the guided rebinding flow for one profile: hold any pad button for
-## three seconds, release it, then capture every canonical action in order.
+## two seconds, release it, then capture every canonical action in order.
 func open_controller_binding(profile_id: String) -> void:
 	_mode = "padbind"
 	_pad_profile_id = profile_id
@@ -790,6 +796,20 @@ func open_controller_binding(profile_id: String) -> void:
 	_rebuild()
 	visible = true
 	_claim.start([])
+
+
+## Opens the keyboard bindings page for one profile: every mutation works
+## on a copy of that profile's mapping and commits through the host
+## command, so bindings never bleed between profiles.
+func open_keyboard_binding(profile_id: String) -> void:
+	_mode = "kb"
+	_kb_profile_id = profile_id
+	_kb_profile = _host.settings.keyboard_bindings_for(profile_id)
+	_selected = 0
+	_cancel_padbind()
+	_capture.stop()
+	_rebuild()
+	visible = true
 
 
 func _cancel_padbind() -> void:
@@ -815,7 +835,7 @@ func _update_padbind_status() -> void:
 	match _pad_stage:
 		PAD_STAGE_CLAIM:
 			var progress: int = int(round(_claim.progress() * 100.0))
-			_status.text = "Hold any pad button 3 seconds...  %d%%" % progress
+			_status.text = "Hold any pad button 2 seconds...  %d%%" % progress
 		PAD_STAGE_RELEASE:
 			_status.text = "Pad %d claimed - release the button to start" % _pad_device
 		PAD_STAGE_CAPTURE:
@@ -1057,7 +1077,7 @@ func _on_captured(record: Dictionary) -> void:
 	if row.get("kind") != "binding":
 		return
 	var action: String = row["action"]
-	var profile: Dictionary = _host.settings.keyboard_bindings
+	var profile: Dictionary = _kb_profile
 	if _has_matching(profile.get(action, []), record):
 		_status.text = "Already bound to this action"
 		return
@@ -1083,13 +1103,13 @@ func _on_cleared() -> void:
 		return
 	var action: String = row["action"]
 	var records: Array = []
-	for existing in _host.settings.keyboard_bindings.get(action, []):
+	for existing in _kb_profile.get(action, []):
 		records.append(existing)
 	if records.is_empty():
 		_status.text = "Nothing to clear"
 		return
 	records.remove_at(records.size() - 1)
-	_host.settings.keyboard_bindings[action] = records
+	_kb_profile[action] = records
 	_commit_bindings()
 	_status.text = "Cleared latest keyboard binding"
 
@@ -1107,23 +1127,22 @@ func _on_capture_cancelled() -> void:
 
 func _reset_action(action: String) -> void:
 	var defaults := DefaultBindings.default_keyboard_profile()
-	var profile: Dictionary = _host.settings.keyboard_bindings
 	var records: Array = []
 	for record in defaults[action]:
 		records.append(record)
-	profile[action] = records
+	_kb_profile[action] = records
 	_remove_records_from_other_actions(action, records)
 	_commit_bindings()
 
 
 func _reset_category(_category: String) -> void:
-	_host.settings.keyboard_bindings = DefaultBindings.default_keyboard_profile()
-	_dedupe_profile(_host.settings.keyboard_bindings)
+	_kb_profile = DefaultBindings.default_keyboard_profile()
+	_dedupe_profile(_kb_profile)
 	_commit_bindings()
 
 
 func _remove_records_from_other_actions(action: String, records: Array) -> void:
-	var profile: Dictionary = _host.settings.keyboard_bindings
+	var profile: Dictionary = _kb_profile
 	for other in profile:
 		if other == action:
 			continue
@@ -1157,7 +1176,7 @@ func _dedupe_profile(profile: Dictionary) -> void:
 # ----------------------------------------------------------------- helpers
 
 func _category_records(action: String) -> Array:
-	return DefaultBindings.records_for_category(_host.settings.keyboard_bindings.get(action, []), "keyboard")
+	return DefaultBindings.records_for_category(_kb_profile.get(action, []), "keyboard")
 
 
 func _update_toggle_status(row: Dictionary) -> void:
@@ -1177,5 +1196,9 @@ func _commit_values() -> void:
 
 
 func _commit_bindings() -> void:
-	_host.cmd_keyboard_bindings_changed()
+	## Commit the working copy to the target profile atomically, then
+	## re-read the sanitized result so the page and the profile stay in
+	## sync (sanitation may drop invalid records).
+	if _host.cmd_keyboard_bindings_captured(_kb_profile_id, _kb_profile):
+		_kb_profile = _host.settings.keyboard_bindings_for(_kb_profile_id)
 	_render_rows()

@@ -6,6 +6,14 @@ extends Node2D
 ## come from the resolved theme tokens (piece colors contrast-validated
 ## per piece) and media (per-piece skins, dither). Ghost pieces stay
 ## color-only; skins and dither apply to solid cells only.
+##
+## Online clients render a snapshot-driven twin: the host pushes render
+## interpolation samples (previous/current piece positions plus receive
+## timestamps) after every applied snapshot, and the active-piece position
+## and flash clock smoothly catch up between the two samples. Everything
+## else - locks, clears, geometry, gameplay decisions - stays snapped to
+## the current authoritative state, and local runs draw the live
+## simulation directly (no samples).
 
 const TetrominoData = preload("res://scripts/core/tetromino_data.gd")
 const ThemeProfile = preload("res://scripts/ui/theme_profile.gd")
@@ -18,6 +26,10 @@ const KIND_LETTERS := ThemeProfile.KIND_LETTERS
 var session: RefCounted = null
 var cell: float = 28.0
 var _hidden_rows: int = 2
+## Latest render interpolation sample pushed by the host (online clients
+## only): {"t0", "t1" (msec), "snap_all", "prev"/"cur" (per-slot piece
+## samples), "elapsed_prev"/"elapsed_cur"}. Empty = draw the live state.
+var interpolation: Dictionary = {}
 
 var _tokens: Dictionary = ThemeProfile.default_tokens()
 var _piece_colors: Dictionary = ThemeProfile.piece_colors(_tokens)
@@ -103,9 +115,11 @@ func _draw() -> void:
 				continue
 			_draw_themed_cell(Rect2(x * cell, y * cell, cell, cell), Vector2i(x, y), value)
 
-	# Line-clear flash across the whole shared board.
+	# Line-clear flash across the whole shared board (the flash clock
+	# interpolates between authoritative samples on clients).
+	var flash_elapsed := _interp_elapsed(session.elapsed)
 	for y in clearing:
-		var alpha: float = 0.55 + 0.45 * absf(sin(session.elapsed * 24.0))
+		var alpha: float = 0.55 + 0.45 * absf(sin(flash_elapsed * 24.0))
 		draw_rect(Rect2(0.0, y * cell, width * cell, cell), Color(flash, alpha))
 
 	# Ghost and active piece of every player with a piece in play.
@@ -117,9 +131,59 @@ func _draw() -> void:
 				if c.y >= 0:
 					draw_rect(Rect2(c.x * cell, c.y * cell, cell, cell), ghost_fill)
 					draw_rect(Rect2(c.x * cell, c.y * cell, cell, cell), ghost_line, false, 2.0)
+			# The active piece interpolates between authoritative samples;
+			# the ghost stays snapped to its target position.
+			var offset := _interp_offset(p.index) * cell
 			for c in session.current_cells(p.index):
 				if c.y >= 0:
-					_draw_themed_cell(Rect2(c.x * cell, c.y * cell, cell, cell), c, p.piece_kind)
+					_draw_themed_cell(Rect2(c.x * cell + offset.x, c.y * cell + offset.y, cell, cell), c, p.piece_kind)
+
+
+## Render alpha in [0,1]: how far the visual clock moved from the previous
+## toward the current authoritative sample (1.0 = fully caught up).
+func _interp_alpha() -> float:
+	if interpolation.is_empty():
+		return 1.0
+	var t0 := float(interpolation.get("t0", 0.0))
+	var t1 := float(interpolation.get("t1", t0))
+	if t1 <= t0:
+		return 1.0
+	return clampf((float(Time.get_ticks_msec()) - t0) / (t1 - t0), 0.0, 1.0)
+
+
+## Float-cell draw offset for one player's active piece: interpolated
+## between the previous and current authoritative samples while the piece
+## identity (kind/state) is unchanged; snapped to zero on any structural
+## change, rotation, new piece, or missing sample.
+func _interp_offset(player: int) -> Vector2:
+	if interpolation.is_empty() or bool(interpolation.get("snap_all", true)):
+		return Vector2.ZERO
+	var alpha := _interp_alpha()
+	if alpha >= 1.0:
+		return Vector2.ZERO
+	var prev: Dictionary = interpolation.get("prev", {})
+	var cur: Dictionary = interpolation.get("cur", {})
+	if not prev.has(player) or not cur.has(player):
+		return Vector2.ZERO
+	var a: Dictionary = prev[player]
+	var b: Dictionary = cur[player]
+	if a.get("kind") != b.get("kind") or a.get("state") != b.get("state"):
+		return Vector2.ZERO
+	var dx := (float(a.get("x", 0.0)) - float(b.get("x", 0.0))) * (1.0 - alpha)
+	var dy := (float(a.get("y", 0.0)) - float(b.get("y", 0.0))) * (1.0 - alpha)
+	return Vector2(dx, dy)
+
+
+## Authoritative elapsed time for the flash clock: interpolated between
+## the previous and current samples so the pulse stays smooth across
+## snapshot steps.
+func _interp_elapsed(live_elapsed: float) -> float:
+	if interpolation.is_empty() or bool(interpolation.get("snap_all", true)):
+		return live_elapsed
+	var alpha := _interp_alpha()
+	var a := float(interpolation.get("elapsed_prev", live_elapsed))
+	var b := float(interpolation.get("elapsed_cur", live_elapsed))
+	return lerpf(a, b, alpha)
 
 
 ## One solid cell: the piece skin texture when the theme provides a valid

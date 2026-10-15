@@ -1,6 +1,6 @@
 extends Node
 ## Session-scoped controller claim: while active, the player holds any
-## button on an available pad for three seconds to claim it for a lobby
+## button on an available pad for two seconds to claim it for a lobby
 ## slot or a binding flow. Consumes joypad input from candidate devices in
 ## _input() so no menu or gameplay reacts to the claim, and Escape cancels.
 ## The hold logic lives in HoldTracker (pure); the snapshot poller is a

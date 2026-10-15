@@ -1,11 +1,11 @@
 extends "res://tests/test_lib.gd"
 ## Input bindings tests: record serialization, categories, conflicts,
 ## keyboard-only InputMap application (no profile controller leakage),
-## per-device record polling, the hold tracker behind controller claims,
-## and the raw controller UI navigation classifier.
+## per-device record polling, per-profile keyboard record polling (local
+## multiplayer routes raw records per slot), the hold tracker behind
+## controller claims, and the raw controller UI navigation classifier.
 
 const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
-const CoopBindings = preload("res://scripts/input/coop_bindings.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 const HoldTracker = preload("res://scripts/input/hold_tracker.gd")
 const UiNavigation = preload("res://scripts/ui/ui_navigation.gd")
@@ -207,31 +207,130 @@ func test_action_for_record_prefers_canonical_order() -> void:
 	check_eq(DefaultBindings.action_for_record(empty, DefaultBindings.joy_button_record(0)), "", "empty profile reports no action")
 
 
-# ------------------------------------------------------------- coop presets
+# ------------------------------------------------- per-profile keyboard polls
 
-func test_keyboard_presets_are_disjoint() -> void:
-	var reserved: Array = [KEY_ENTER, KEY_ESCAPE, KEY_SPACE, KEY_P, KEY_R]
-	var seen: Array = []
-	for player in CoopBindings.MAX_PLAYERS:
-		var preset: Dictionary = CoopBindings.keyboard_preset(player)
-		for action in CoopBindings.ACTIONS:
-			check(preset.has(action), "player %d preset defines %s" % [player, action])
-			var code: int = preset[action]
-			check_false(seen.has(code), "key %d used by only one player" % code)
-			check_false(reserved.has(code), "key %d not used by menu/shared actions" % code)
-			seen.append(code)
+func _press_key(physical: Key, keycode: Key = KEY_UNKNOWN, ctrl := false, alt := false, shift := false) -> void:
+	# Synthetic key state for polling checks: real events carry both the
+	# physical keycode and the layout keycode; modifiers ride the event
+	# flags (and also press the modifier keys themselves).
+	var ev := InputEventKey.new()
+	ev.physical_keycode = physical
+	if keycode != KEY_UNKNOWN:
+		ev.keycode = keycode
+	ev.pressed = true
+	ev.ctrl_pressed = ctrl
+	ev.alt_pressed = alt
+	ev.shift_pressed = shift
+	Input.parse_input_event(ev)
+	if ctrl:
+		var c := InputEventKey.new()
+		c.physical_keycode = KEY_CTRL
+		c.keycode = KEY_CTRL
+		c.pressed = true
+		Input.parse_input_event(c)
+	if alt:
+		var a := InputEventKey.new()
+		a.physical_keycode = KEY_ALT
+		a.keycode = KEY_ALT
+		a.pressed = true
+		Input.parse_input_event(a)
+	if shift:
+		var s := InputEventKey.new()
+		s.physical_keycode = KEY_SHIFT
+		s.keycode = KEY_SHIFT
+		s.pressed = true
+		Input.parse_input_event(s)
+	Input.flush_buffered_events()
 
 
-func test_coop_bindings_retired_fixed_controller_layout() -> void:
-	# Controller routing is per-profile now; the fixed pad layout and its
-	# joypad summary are gone while the keyboard clusters remain as the
-	# non-controller fallback.
-	check(CoopBindings.ACTIONS.size() == 7, "seven cluster actions")
-	check_eq(CoopBindings.SINGLE_FIRE_ACTIONS, ["rotate_cw", "rotate_ccw", "hold", "hard_drop"], "single-fire actions listed")
-	check_false(CoopBindings.keyboard_summary(0).is_empty(), "keyboard cluster summary still describes the fallback")
-	check_false(CoopBindings.keyboard_preset(0).is_empty(), "keyboard presets intact")
-	for action in ["pause", "restart"]:
-		check_false(CoopBindings.ACTIONS.has(action), "pause/restart are shared, not cluster actions")
+func _release_key(physical: Key, ctrl := false, alt := false, shift := false) -> void:
+	# The keycode rides every synthetic release too: Input tracks pressed
+	# keys by keycode, so a physical-only release would leave the modifier
+	# latched for later suites in the same process.
+	var ev := InputEventKey.new()
+	ev.physical_keycode = physical
+	ev.keycode = physical
+	ev.pressed = false
+	Input.parse_input_event(ev)
+	if ctrl:
+		var c := InputEventKey.new()
+		c.physical_keycode = KEY_CTRL
+		c.keycode = KEY_CTRL
+		c.pressed = false
+		Input.parse_input_event(c)
+	if alt:
+		var a := InputEventKey.new()
+		a.physical_keycode = KEY_ALT
+		a.keycode = KEY_ALT
+		a.pressed = false
+		Input.parse_input_event(a)
+	if shift:
+		var s := InputEventKey.new()
+		s.physical_keycode = KEY_SHIFT
+		s.keycode = KEY_SHIFT
+		s.pressed = false
+		Input.parse_input_event(s)
+	Input.flush_buffered_events()
+
+
+func test_keyboard_record_held() -> void:
+	var record := DefaultBindings.key_record(KEY_J)
+	check_false(DefaultBindings.keyboard_record_held(record), "unheld key does not satisfy")
+	_press_key(KEY_J)
+	check_true(DefaultBindings.keyboard_record_held(record), "held key satisfies")
+	_release_key(KEY_J)
+	check_false(DefaultBindings.keyboard_record_held(record), "released key stops satisfying")
+
+
+func test_keyboard_record_held_requires_exact_modifiers() -> void:
+	# Raw keyboard matching respects the physical key code AND the
+	# modifier fields: a plain key record is not satisfied while a
+	# modifier is held, and a modified record is not satisfied bare.
+	var plain := DefaultBindings.key_record(KEY_K)
+	var with_ctrl := DefaultBindings.key_record(KEY_K)
+	with_ctrl["ctrl"] = true
+	_press_key(KEY_K)
+	check_true(DefaultBindings.keyboard_record_held(plain), "bare press satisfies the plain record")
+	check_false(DefaultBindings.keyboard_record_held(with_ctrl), "bare press does not satisfy the ctrl record")
+	_press_key(KEY_CTRL, KEY_CTRL)
+	check_false(DefaultBindings.keyboard_record_held(plain), "ctrl+key does not satisfy the plain record")
+	check_true(DefaultBindings.keyboard_record_held(with_ctrl), "ctrl+key satisfies the ctrl record")
+	_release_key(KEY_K)
+	_release_key(KEY_CTRL)
+	var with_shift := DefaultBindings.key_record(KEY_K)
+	with_shift["shift"] = true
+	_press_key(KEY_K, KEY_UNKNOWN, false, false, true)
+	check_false(DefaultBindings.keyboard_record_held(plain), "shift+key does not satisfy the plain record")
+	check_true(DefaultBindings.keyboard_record_held(with_shift), "shift+key satisfies the shift record")
+	_release_key(KEY_K, false, false, true)
+
+
+func test_keyboard_action_held_matches_any_record() -> void:
+	var profile := DefaultBindings.default_keyboard_profile()
+	# The default mapping binds move_left; make it an obscure key so the
+	# rest of the default keyboard stays inert during the check.
+	profile["move_left"] = [DefaultBindings.key_record(KEY_F9)]
+	check_false(DefaultBindings.keyboard_action_held(profile, "move_left"), "action reads unpressed before the press")
+	_press_key(KEY_F9)
+	check_true(DefaultBindings.keyboard_action_held(profile, "move_left"), "any record of the action satisfies")
+	check_false(DefaultBindings.keyboard_action_held(profile, "move_right"), "other actions stay unpressed")
+	_release_key(KEY_F9)
+	var empty: Dictionary = {}
+	check_false(DefaultBindings.keyboard_action_held(empty, "move_left"), "empty profile reads unpressed")
+
+
+func test_action_for_record_matches_keyboard_profiles() -> void:
+	# The coop fast path matches raw keyboard records against per-profile
+	# mappings: same physical key + modifiers, different action per profile.
+	var a := DefaultBindings.default_keyboard_profile()
+	a["hold"] = [DefaultBindings.key_record(KEY_H)]
+	var b := DefaultBindings.default_keyboard_profile()
+	b["hold"] = []
+	b["rotate_cw"] = [DefaultBindings.key_record(KEY_H)]
+	var record := DefaultBindings.key_record(KEY_H)
+	check_eq(DefaultBindings.action_for_record(a, record), "hold", "profile A maps the key to hold")
+	check_eq(DefaultBindings.action_for_record(b, record), "rotate_cw", "profile B maps the same key to rotate_cw")
+	check_eq(DefaultBindings.action_for_record(b, DefaultBindings.key_record(KEY_UNKNOWN)), "", "unbound key reports no action")
 
 
 # ------------------------------------------------------------- hold tracker
@@ -240,22 +339,22 @@ func _tick(tracker, pressed: Dictionary, excluded: Array, step: float) -> Dictio
 	return tracker.update(pressed, excluded, step)
 
 
-func test_hold_tracker_completes_after_three_seconds() -> void:
+func test_hold_tracker_completes_after_two_seconds() -> void:
 	var t := HoldTracker.new()
 	var event := {}
-	for i in 6:
+	for i in 4:
 		event = _tick(t, {0: [2]}, [], 0.5)
-	check_eq(event["event"], "claimed", "3 seconds of hold claims the pad")
+	check_eq(event["event"], "claimed", "2 seconds of hold claims the pad")
 	check_eq(event["device"], 0, "claimed device reported")
 	check_eq(t.state(), HoldTracker.STATE_COMPLETE, "tracker waits for release")
 
 
 func test_hold_tracker_progress_and_reset() -> void:
 	var t := HoldTracker.new()
-	_tick(t, {3: [0]}, [], 1.0)
-	check_true(is_equal_approx(t.progress(), 1.0 / 3.0), "progress accumulates")
-	_tick(t, {3: [0]}, [], 1.0)
-	check_true(is_equal_approx(t.progress(), 2.0 / 3.0), "progress keeps accumulating")
+	_tick(t, {3: [0]}, [], 0.5)
+	check_true(is_equal_approx(t.progress(), 0.5 / 2.0), "progress accumulates")
+	_tick(t, {3: [0]}, [], 0.5)
+	check_true(is_equal_approx(t.progress(), 1.0 / 2.0), "progress keeps accumulating")
 	# Releasing mid-hold resets to zero.
 	_tick(t, {}, [], 0.5)
 	check_eq(t.progress(), 0.0, "release resets progress")
@@ -264,28 +363,28 @@ func test_hold_tracker_progress_and_reset() -> void:
 
 func test_hold_tracker_resets_on_button_or_device_change() -> void:
 	var t := HoldTracker.new()
-	_tick(t, {1: [4]}, [], 2.0)
-	check_true(is_equal_approx(t.progress(), 2.0 / 3.0), "initial hold accumulates")
+	_tick(t, {1: [4]}, [], 1.0)
+	check_true(is_equal_approx(t.progress(), 0.5), "initial hold accumulates")
 	_tick(t, {1: [5]}, [], 0.5)
-	check_true(is_equal_approx(t.progress(), 0.5 / 3.0), "switching buttons restarts the hold from zero")
+	check_true(is_equal_approx(t.progress(), 0.25), "switching buttons restarts the hold from zero")
 	_tick(t, {2: [5]}, [], 0.5)
-	check_true(is_equal_approx(t.progress(), 0.5 / 3.0), "switching devices restarts the hold")
+	check_true(is_equal_approx(t.progress(), 0.25), "switching devices restarts the hold")
 	check_eq(t.device(), 2, "candidate follows the new device")
 
 
 func test_hold_tracker_excludes_claimed_devices() -> void:
 	var t := HoldTracker.new()
-	var event := _tick(t, {0: [1]}, [0], 3.0)
+	var event := _tick(t, {0: [1]}, [0], 2.0)
 	check_eq(event["event"], "", "excluded pad is not a candidate")
 	check_eq(event["device"], -1, "no candidate while only excluded pads are held")
-	var claim := _tick(t, {0: [1], 1: [1]}, [0], 3.0)
+	var claim := _tick(t, {0: [1], 1: [1]}, [0], 2.0)
 	check_eq(claim["event"], "claimed", "a free pad claims while the excluded pad is held")
 	check_eq(claim["device"], 1, "claim names the free pad, never the excluded one")
 
 
 func test_hold_tracker_requires_release_after_claim() -> void:
 	var t := HoldTracker.new()
-	_tick(t, {0: [1]}, [], 3.0)
+	_tick(t, {0: [1]}, [], 2.0)
 	check_eq(_tick(t, {0: [1, 2]}, [], 1.0)["event"], "", "still holding: no second event")
 	var event := _tick(t, {}, [], 1.0)
 	check_eq(event["event"], "released", "release reported after the claim")
@@ -347,14 +446,35 @@ func test_mode_descriptors() -> void:
 	var keys: Array = []
 	for d in ModeRules.descriptors():
 		keys.append(d["key"])
-	check_eq(keys, ["solo_marathon", "coop_marathon", "solo_sprint", "coop_sprint"], "stable mode keys")
+	check_eq(
+		keys,
+		["solo_marathon", "coop_marathon", "solo_sprint", "coop_sprint", "solo_tower", "classic_versus", "tower"],
+		"stable mode keys"
+	)
 	check_eq(ModeRules.mode_key(ModeRules.Mode.MARATHON, false), "solo_marathon", "solo marathon key")
 	check_eq(ModeRules.mode_key(ModeRules.Mode.SPRINT, true), "coop_sprint", "coop sprint key")
+	check_eq(ModeRules.mode_key(ModeRules.Mode.TOWER, false), "solo_tower", "solo tower leaderboard key")
 	check_eq(ModeRules.descriptor("coop_sprint")["ranking"], ModeRules.RANK_TIME_ASC, "sprint ranks by time")
 	check_eq(ModeRules.descriptor("solo_marathon")["ranking"], ModeRules.RANK_SCORE_DESC, "marathon ranks by score")
+	check_eq(ModeRules.descriptor("solo_tower")["ranking"], ModeRules.RANK_HEIGHT_ASC, "tower ranks by height then score")
+	check_true(bool(ModeRules.descriptor("classic_versus").get("match_history", false)), "versus describes the match history, not a best-run table")
 	check_eq(ModeRules.descriptor("unknown_mode"), {}, "unknown key has no descriptor")
 	check_true(ModeRules.higher_score_wins(ModeRules.Mode.MARATHON), "marathon keeps higher scores")
 	check_false(ModeRules.higher_score_wins(ModeRules.Mode.SPRINT), "sprint keeps lower times")
+
+
+func test_competitive_match_validation() -> void:
+	check_true(ModeRules.valid_competitive_match(ModeRules.Mode.CLASSIC_VERSUS, 2, true), "2p versus with garbage")
+	check_true(ModeRules.valid_competitive_match(ModeRules.Mode.CLASSIC_VERSUS, 4, false), "4p versus without garbage")
+	check_false(ModeRules.valid_competitive_match(ModeRules.Mode.CLASSIC_VERSUS, 1, false), "versus needs at least two players")
+	check_false(ModeRules.valid_competitive_match(ModeRules.Mode.CLASSIC_VERSUS, 5, false), "versus caps at four players")
+	check_true(ModeRules.valid_competitive_match(ModeRules.Mode.TOWER, 1, false), "solo tower")
+	check_true(ModeRules.valid_competitive_match(ModeRules.Mode.TOWER, 4, false), "4p tower")
+	check_false(ModeRules.valid_competitive_match(ModeRules.Mode.TOWER, 2, true), "tower never runs with garbage")
+	check_false(ModeRules.valid_competitive_match(ModeRules.Mode.MARATHON, 2, false), "coop modes are not competitive matches")
+	check_true(ModeRules.is_competitive(ModeRules.Mode.TOWER), "tower is competitive")
+	check_true(ModeRules.is_competitive(ModeRules.Mode.CLASSIC_VERSUS), "versus is competitive")
+	check_false(ModeRules.is_competitive(ModeRules.Mode.MARATHON), "marathon is not")
 
 
 func test_mode_recording_eligibility() -> void:

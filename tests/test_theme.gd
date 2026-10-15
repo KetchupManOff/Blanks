@@ -1072,6 +1072,74 @@ func test_theme_change_updates_all_presentation_nodes() -> void:
 	check_eq(_host._previews[0]._piece_colors["o"], new_tokens["pieces.o"], "preview mini updated")
 
 
+func test_theme_refresh_updates_cinematic_menu_controls() -> void:
+	_host.cmd_return_to_menu()
+	_host.cmd_theme_selected("builtin:retro_crt")
+	var tokens: Dictionary = _host.themes.tokens()
+	var menu: CanvasLayer = _host._menu
+	check_eq(menu._bg.color, tokens["menu.scrim"], "scrim follows the theme")
+	check_eq(menu._title.get_theme_color("font_color"), tokens["theme.text"], "title color follows theme.text")
+	check_eq(menu._title.get_theme_font_size("font_size"), tokens["menu.title_size"], "title size follows menu.title_size")
+	check_eq(menu._subtitle.get_theme_color("font_color"), tokens["theme.dim"], "subtitle follows theme.dim")
+	check_eq(menu._detail.get_theme_color("font_color"), tokens["theme.dim"], "detail follows theme.dim")
+	var sel: int = menu._selected
+	check_eq(menu._row_styles[sel].bg_color, tokens["menu.panel"], "selected row uses menu.panel")
+	check_eq(menu._row_styles[sel].border_color, tokens["menu.divider"], "selected row border uses menu.divider")
+	check_eq(menu._labels[sel].get_theme_color("font_color"), tokens["menu.focus"], "selected label uses menu.focus")
+	check_eq(menu._labels[sel].get_theme_font_size("font_size"), tokens["menu.item_size"], "item size follows menu.item_size")
+	for i in menu._labels.size():
+		if i == sel:
+			continue
+		check_eq(menu._labels[i].get_theme_color("font_color"), tokens["theme.dim"], "unselected label uses theme.dim")
+		check_eq(menu._row_styles[i].bg_color.a, 0.0, "unselected row background stays transparent")
+
+
+func test_theme_switch_preserves_menu_rows_and_selection() -> void:
+	_host.cmd_return_to_menu()
+	var menu: CanvasLayer = _host._menu
+	menu._move(1)
+	menu._move(1)
+	var selected: int = menu._selected
+	var labels: Array = []
+	for item in menu._items:
+		labels.append(item["label"])
+	_host.cmd_theme_selected("builtin:clean_tournament")
+	check_eq(menu._selected, selected, "selection preserved across the theme switch")
+	check_eq(menu._items.size(), 6, "item list unchanged")
+	check_eq(menu._rows.size(), menu._items.size(), "row count preserved")
+	var after: Array = []
+	for item in menu._items:
+		after.append(item["label"])
+	check_eq(after, labels, "labels unchanged")
+	var tokens: Dictionary = _host.themes.tokens()
+	check_eq(menu._row_styles[selected].bg_color, tokens["menu.panel"], "selected row follows the new theme")
+	check_eq(menu._labels[selected].get_theme_color("font_color"), tokens["menu.focus"], "selected label follows the new theme")
+	menu._move(1)
+	check_eq(menu._selected, wrapi(selected + 1, 0, menu._items.size()), "navigation still works after the switch")
+	check_eq(menu._row_styles[menu._selected].bg_color, tokens["menu.panel"], "movement re-themes the newly selected row")
+
+
+func test_menu_composition_across_builtin_themes() -> void:
+	# The shared composition must express itself entirely through each
+	# theme's resolved tokens: no fixed palette assumptions anywhere.
+	for id in ["builtin:modern_neon", "builtin:retro_crt", "builtin:clean_tournament", "builtin:game_boy"]:
+		_host.cmd_return_to_menu()
+		_host.cmd_theme_selected(id)
+		var tokens: Dictionary = _host.themes.tokens()
+		var menu: CanvasLayer = _host._menu
+		var sel: int = menu._selected
+		var idle: int = 0 if sel != 0 else 1
+		check_eq(menu._row_styles[sel].bg_color, tokens["menu.panel"], id + ": selected row themed from menu.panel")
+		check_eq(menu._row_styles[sel].border_color, tokens["menu.divider"], id + ": divider themed from menu.divider")
+		check_eq(menu._labels[sel].get_theme_color("font_color"), tokens["menu.focus"], id + ": focus color themed from menu.focus")
+		check_eq(menu._labels[idle].get_theme_color("font_color"), tokens["theme.dim"], id + ": dim color themed from theme.dim")
+		check_eq(menu._title.get_theme_color("font_color"), tokens["theme.text"], id + ": title color themed from theme.text")
+		check_eq(menu._items_box.custom_minimum_size.x, clampf(float(tokens["menu.item_size"]) * 20.0, 480.0, 720.0), id + ": row width derived from the theme's item size")
+		check_eq(menu._items_box.get_theme_constant("separation"), tokens["menu.spacing"], id + ": row gap derived from menu.spacing")
+	_restore_host_themes_standard()
+	_host.cmd_return_to_menu()
+
+
 func test_backdrop_is_full_viewport_and_non_interactive() -> void:
 	check_eq(_host._backdrop_layer.get_parent(), _host, "backdrop layer parented to the host root")
 	check_true(_host._backdrop_layer.layer < 0, "backdrop layer draws below the base canvas")
@@ -1209,7 +1277,7 @@ func test_theme_fonts_propagate_to_labels() -> void:
 	check_true(_host._menu._subtitle.has_theme_font_override("font"), "menu subtitle uses the body font")
 	check_true(_host._menu._detail.has_theme_font_override("font"), "menu detail uses the body font")
 	check_eq(_host._menu._labels.size(), _host._menu._items.size(), "menu items rebuilt with fonts")
-	check_eq(_host._menu._labels.size(), 7, "main menu items present")
+	check_eq(_host._menu._labels.size(), 6, "main menu category items present")
 	for label in _host._menu._labels:
 		check_true(label.has_theme_font_override("font"), "menu item labels use the body font")
 	check_true(_host._hud._overlay_title.has_theme_font_override("font"), "hud overlay heading uses the title font")

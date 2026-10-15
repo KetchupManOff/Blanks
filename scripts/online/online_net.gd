@@ -27,6 +27,10 @@ const MSG_MATCH_STARTED: String = "match_started"
 const MSG_ROUND_FINISHED: String = "round_finished"
 const MSG_RETURN_TO_LOBBY: String = "return_to_lobby"
 const MSG_SNAPSHOT: String = "snapshot"
+# Host-authoritative pause replication: {"paused": bool, "rev": int} sent
+# host -> clients on every toggle and carried (same fields) by every
+# structural snapshot.
+const MSG_PAUSE_STATE: String = "pause_state"
 
 var service: Node = null
 
@@ -90,5 +94,7 @@ func receive(sender: int, payload: PackedByteArray) -> void:
 			service._net_return_to_lobby(sender)
 		MSG_SNAPSHOT:
 			service._net_snapshot(sender, data)
+		MSG_PAUSE_STATE:
+			service._net_pause_state(sender, data)
 		_:
 			push_warning("online: ignoring unknown message type '%s'" % envelope["t"])

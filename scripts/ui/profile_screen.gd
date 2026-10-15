@@ -109,6 +109,7 @@ func _build_items() -> Array:
 		if settings.active_profile_id != _submenu_profile_id:
 			items.append(make_item("SET ACTIVE", Callable(self, "_set_active").bind(_submenu_profile_id)))
 		items.append(make_item("RENAME", Callable(self, "_rename_profile").bind(name)))
+		items.append(make_item("KEYBOARD BINDINGS", Callable(self, "_bind_keyboard").bind(_submenu_profile_id)))
 		items.append(make_item("CONTROLLER BINDINGS", Callable(self, "_bind_controller").bind(_submenu_profile_id)))
 	items.append(make_item("BACK", Callable(self, "_item_back")))
 	return items
@@ -156,6 +157,11 @@ func _rename_profile(_current_name: String) -> void:
 	_host.cmd_open_name_rename(_submenu_profile_id)
 
 
+func _bind_keyboard(profile_id: String) -> void:
+	_play_nav_sfx("menu_confirm")
+	_host.cmd_profile_bind_keyboard(profile_id)
+
+
 func _bind_controller(profile_id: String) -> void:
 	_play_nav_sfx("menu_confirm")
 	_host.cmd_profile_bind_controller(profile_id)
@@ -190,7 +196,8 @@ func _move(delta: int) -> void:
 
 
 ## Fills the left detail panel with the selected profile's result
-## histories, best first, using the mode descriptors for labels.
+## histories, best first, using the mode descriptors for labels, plus the
+## separate multiplayer competitive match history.
 func _update_detail() -> void:
 	if _detail == null or _host == null:
 		return
@@ -206,21 +213,57 @@ func _update_detail() -> void:
 	var lines: Array[String] = [String(profile["name"]).to_upper(), ""]
 	var any := false
 	for descriptor in ModeRules.descriptors():
+		if bool(descriptor.get("match_history", false)):
+			continue
 		var history: Array = settings.profile_history(profile_id, descriptor["key"])
 		if history.is_empty():
 			continue
 		any = true
 		var entries: Array[String] = []
 		for record in history:
-			if descriptor["ranking"] == ModeRules.RANK_SCORE_DESC:
-				entries.append("%d" % int(record["score"]))
-			else:
-				entries.append(ModeRules.format_time(float(record["elapsed"])))
+			match String(descriptor["ranking"]):
+				ModeRules.RANK_HEIGHT_ASC:
+					entries.append("H%d %d" % [int(record.get("height", 0)), int(record["score"])])
+				ModeRules.RANK_TIME_ASC:
+					entries.append(ModeRules.format_time(float(record["elapsed"])))
+				_:
+					entries.append("%d" % int(record["score"]))
 		lines.append("%s:" % descriptor["label"].to_upper())
 		lines.append("  " + "  ".join(entries))
+	var matches: Array = settings.profile_match_history(profile_id)
+	if not matches.is_empty():
+		any = true
+		lines.append("MATCHES:")
+		for i in mini(matches.size(), 5):
+			lines.append("  " + _match_line(matches[i]))
 	if not any:
 		lines.append("NO RESULTS YET")
 	_detail.text = "\n".join(lines)
+
+
+## One compact multiplayer match summary, newest first.
+func _match_line(record: Dictionary) -> String:
+	var label := ModeRules.mode_display_name(int(ModeRules.Mode.TOWER))
+	for descriptor in ModeRules.descriptors():
+		if bool(descriptor.get("match_history", false)) and descriptor["key"] == String(record.get("mode", "")):
+			label = String(descriptor["label"]).to_upper()
+	var outcome := "DRAW"
+	if bool(record.get("draw", false)):
+		outcome = "DRAW"
+	elif int(record.get("placement", 0)) >= 1:
+		match int(record["placement"]):
+			1: outcome = "1ST"
+			2: outcome = "2ND"
+			3: outcome = "3RD"
+			_: outcome = "4TH"
+	elif bool(record.get("won", false)):
+		outcome = "WIN"
+	else:
+		outcome = "LOSS"
+	var text := "%s %s %dP" % [outcome, label, int(record.get("players", 2))]
+	if String(record.get("mode", "")) == "tower":
+		text += " H%d" % int(record.get("height", 0))
+	return text
 
 
 ## The profile id of the selected row (submenu or list), or "" when the

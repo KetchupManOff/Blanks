@@ -133,6 +133,15 @@ func set_lines(value: int) -> void:
 	_lines_label.text = str(value)
 
 
+## Hides the personal stat columns (score/level/lines): multiplayer
+## competitive matches carry each player's score on their own board
+## strip, so the shared left column would only show player 0.
+func set_personal_stats_visible(visible: bool) -> void:
+	for i in 3:
+		_stat_titles[i].visible = visible
+		_stat_values[i].visible = visible
+
+
 func set_time(value: float) -> void:
 	_time_label.text = _format_time(value)
 

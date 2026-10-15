@@ -18,8 +18,10 @@ const SUITES := [
 	"res://tests/test_bindings.gd",
 	"res://tests/test_audio.gd",
 	"res://tests/test_coop_core.gd",
+	"res://tests/test_competitive_core.gd",
 	"res://tests/test_shell.gd",
 	"res://tests/test_coop_shell.gd",
+	"res://tests/test_competitive_shell.gd",
 	"res://tests/test_online_core.gd",
 	"res://tests/test_online_session.gd",
 ]

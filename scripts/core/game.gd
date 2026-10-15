@@ -54,6 +54,9 @@ var level: int = 1
 var combo: int = -1  # -1 = no active chain, else consecutive clears - 1
 var b2b_active: bool = false
 var last_event: Scoring.ClearEvent = null
+# Local event revision: identifies each lock event so HUD/audio edge
+# detection compares revisions, not object instances.
+var _event_revision: int = 0
 
 
 func _init(game_mode: int = ModeRules.Mode.MARATHON, game_seed: int = 0) -> void:
@@ -186,7 +189,7 @@ func hard_drop() -> bool:
 		piece_y = target_y
 		score += distance * PlayConfig.HARD_DROP_POINTS_PER_CELL
 		_spin_ready = false
-	_lock_piece()
+	_lock_piece(true)
 	return true
 
 
@@ -243,7 +246,7 @@ func _spawn_from_queue(reset_hold: bool) -> void:
 
 # --------------------------------------------------------------------- lock
 
-func _lock_piece() -> void:
+func _lock_piece(from_hard_drop: bool = false) -> void:
 	var cells: Array = current_cells()
 	var kind: int = piece_kind
 	board.place(cells, kind)
@@ -272,6 +275,9 @@ func _lock_piece() -> void:
 	event.tspin = tspin
 	event.tspin_mini_upgraded = upgraded
 	event.level = level
+	event.rev = _event_revision + 1
+	event.hard_drop = from_hard_drop
+	_event_revision += 1
 
 	if not cleared.is_empty():
 		var difficult: bool = Scoring.is_difficult(tspin, cleared.size())

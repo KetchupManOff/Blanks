@@ -20,6 +20,14 @@ class ClearEvent:
 	var total_points: int = 0
 	var level: int = 1
 	var tspin_mini_upgraded: bool = false
+	## Authoritative event revision: assigned by the owning engine from a
+	## counter that advances exactly when a lock event is created. Stable
+	## across the wire so snapshot rebuilds on clients identify the same
+	## host event (fresh local instance ids never compare equal).
+	var rev: int = 0
+	## True when the lock came from a hard drop: lets the audio-edge layer
+	## suppress the plain lock sound after the drop already played.
+	var hard_drop: bool = false
 
 	func label() -> String:
 		var text: String = ""

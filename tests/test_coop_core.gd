@@ -1,14 +1,13 @@
 extends "res://tests/test_lib.gd"
 ## Cooperative core tests: variable-width boards, section bounds, independent
 ## player state, shared row completion/collapse, team progression, and the
-## deterministic coop seed derivation and fixed control presets.
+## deterministic coop seed derivation.
 
 const Board = preload("res://scripts/core/board.gd")
 const CoopGame = preload("res://scripts/core/coop_game.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 const TetrominoData = preload("res://scripts/core/tetromino_data.gd")
 const PlayConfig = preload("res://scripts/core/constants.gd")
-const CoopBindings = preload("res://scripts/input/coop_bindings.gd")
 
 const K = TetrominoData.Kind
 const MARATHON = ModeRules.Mode.MARATHON
@@ -329,30 +328,6 @@ func test_deterministic_replay() -> void:
 	check_eq(a.players[0].piece_kind, b.players[0].piece_kind, "same piece sequence per player")
 	check_eq(a.players[0].piece_x, b.players[0].piece_x, "same player 0 position")
 	check_eq(a.players[1].piece_x, b.players[1].piece_x, "same player 1 position")
-
-
-# --------------------------------------------------------------- presets
-
-func test_keyboard_presets_are_disjoint() -> void:
-	var reserved: Array = [KEY_ENTER, KEY_ESCAPE, KEY_SPACE, KEY_P, KEY_R]
-	var seen: Array = []
-	for player in CoopBindings.MAX_PLAYERS:
-		var preset: Dictionary = CoopBindings.keyboard_preset(player)
-		for action in CoopBindings.ACTIONS:
-			check(preset.has(action), "player %d preset defines %s" % [player, action])
-			var code: int = preset[action]
-			check_false(seen.has(code), "key %d used by only one player" % code)
-			check_false(reserved.has(code), "key %d not used by menu/shared actions" % code)
-			seen.append(code)
-
-
-func test_fixed_controller_layout_retired() -> void:
-	# Controller routing is per-profile and per-device now; the fixed pad
-	# layout and its single-fire constants are gone.
-	check_eq(CoopBindings.SINGLE_FIRE_ACTIONS, ["rotate_cw", "rotate_ccw", "hold", "hard_drop"], "single-fire cluster actions listed")
-	check_false(CoopBindings.ACTIONS.has("pause"), "pause stays shared, not a cluster action")
-	var preset: Dictionary = CoopBindings.keyboard_preset(3)
-	check_eq(preset["move_left"], KEY_H, "keyboard clusters unchanged")
 
 
 # ---------------------------------------------------------- fuzz invariants

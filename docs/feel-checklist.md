@@ -65,7 +65,7 @@ main menu, and work through the items below.
       restarting the game, and rebooting the machine (settings.json round
       trip).
 - [ ] Controller Bindings opens the guided flow for the active profile:
-      hold any pad button for three seconds (progress shows live;
+      hold any pad button for two seconds (progress shows live;
       releasing or switching buttons/phones resets the hold), release to
       start, then capture one button/axis per action in order with the
       current action and progress visible.
@@ -257,7 +257,7 @@ machine without Godot installed.
 ## Co-op
 
 - [ ] CO-OP on the main menu opens the lobby; Esc/B returns to the menu.
-- [ ] A free pad claims a slot by holding any button for three seconds
+- [ ] A free pad claims a slot by holding any button for two seconds
       (live progress shown); releasing opens the profile picker for that
       slot. Enter on a free slot joins it with the keyboard instead.
 - [ ] Each slot joins by picking or creating a profile; a profile already
@@ -268,7 +268,7 @@ machine without Godot installed.
       becomes claimable again.
 - [ ] Mode toggles Marathon/Sprint; Start launches only with at least one
       joined profile and passes slot order as player order.
-- [ ] The lobby lists each player's fixed keyboard cluster as a fallback;
+- [ ] Each player's fixed keyboard cluster stays the no-pad fallback;
       co-op never writes the shared keyboard profile or the profiles'
       controller bindings.
 - [ ] Each player moves/rotates/drops/holds only their own piece at the same

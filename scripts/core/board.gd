@@ -3,16 +3,20 @@ extends RefCounted
 ## visible field. The width can be supplied at construction for coop boards
 ## (ten columns per player); row detection and clearing always span the whole
 ## board. Stores locked cells as tetromino kind ints (-1 = empty).
-## Pure data model with no engine dependencies beyond Vector2i.
+## The height is runtime-mutable: Tower prepends logical rows at the top as
+## its ceiling grows, so every consumer reads HEIGHT from the instance and
+## snapshot restore validates variable-size geometry. Pure data model with
+## no engine dependencies beyond Vector2i.
 
 const TetrominoData = preload("res://scripts/core/tetromino_data.gd")
 
 const DEFAULT_WIDTH: int = 10
-const HEIGHT: int = 22
+const DEFAULT_HEIGHT: int = 22
 const HIDDEN_ROWS: int = 2
 const VISIBLE_ROWS: int = 20
 
 var WIDTH: int = DEFAULT_WIDTH
+var HEIGHT: int = DEFAULT_HEIGHT
 var _cells := PackedInt32Array()
 
 
@@ -77,6 +81,7 @@ func place(cells: Array, value: int) -> void:
 	# Cells above the board (open sky) cannot be stored: a piece locking
 	# while poking above the buffer simply drops those cells instead of
 	# corrupting storage. Walls/floor are never placeable to begin with.
+	# Tower expansion keeps its pieces out of this path.
 	for c in cells:
 		if c.y < 0:
 			continue
@@ -133,10 +138,78 @@ func is_completely_empty() -> bool:
 	return true
 
 
+# ------------------------------------------------------- dynamic geometry
+# Tower growth and versus garbage: the only two mutation paths that touch
+# geometry. Prepend keeps every locked cell (shifted down by the growth);
+# garbage pushes the stack up from the floor and discards whatever leaves
+# the top, so a fatal garbage wave ends in a normal spawn block-out.
+
+func prepend_rows(count: int) -> void:
+	## Inserts `count` empty rows at the top of the board: every existing
+	## cell shifts DOWN by `count` rows, the floor moves down with it, and
+	## HEIGHT grows by `count`. Nothing is ever discarded. Callers must
+	## translate active pieces by the same amount (the board cannot reach
+	## into their state).
+	if count <= 0:
+		return
+	var out := PackedInt32Array()
+	out.resize(WIDTH * (HEIGHT + count))
+	out.fill(TetrominoData.EMPTY)
+	for y in HEIGHT:
+		var src_start: int = y * WIDTH
+		var dst_start: int = (y + count) * WIDTH
+		for x in WIDTH:
+			out[dst_start + x] = _cells[src_start + x]
+	_cells = out
+	HEIGHT += count
+
+
+func insert_garbage_rows(count: int, hole_columns: Array, garbage_value: int) -> void:
+	## Pushes the whole stack UP by `count` rows and fills the freed bottom
+	## rows with garbage cells, leaving one hole per row at the given column
+	## (hole_columns has exactly one entry per inserted row). Cells pushed
+	## above the board (y < 0) are discarded: a stack that tall dies at the
+	## next spawn instead of silently hiding rows. HEIGHT is unchanged.
+	if count <= 0:
+		return
+	var out := PackedInt32Array()
+	out.resize(WIDTH * HEIGHT)
+	out.fill(TetrominoData.EMPTY)
+	for y in HEIGHT:
+		var src_y: int = y + count
+		if src_y >= HEIGHT:
+			break
+		var src_start: int = src_y * WIDTH
+		var dst_start: int = y * WIDTH
+		for x in WIDTH:
+			out[dst_start + x] = _cells[src_start + x]
+	for row in count:
+		var y: int = HEIGHT - 1 - row
+		var hole: int = clampi(int(hole_columns[mini(row, hole_columns.size() - 1)]), 0, WIDTH - 1)
+		for x in WIDTH:
+			out[y * WIDTH + x] = garbage_value if x != hole else TetrominoData.EMPTY
+	_cells = out
+
+
+func locked_height() -> int:
+	## Occupied distance from the fixed floor (bottom row) to the highest
+	## locked block: zero for an empty board, one for a stack touching only
+	## the bottom row. Invariant under prepend_rows (the stack and the
+	## floor translate together), which is why Tower scoring uses it.
+	for y in HEIGHT:
+		var row_start: int = y * WIDTH
+		for x in WIDTH:
+			if _cells[row_start + x] != TetrominoData.EMPTY:
+				return HEIGHT - y
+	return 0
+
+
 # --------------------------------------------------------------- snapshots
 # Raw cell-array capture/restore for host-authoritative online play. The
-# array is exactly WIDTH * HEIGHT entries; a restore with mismatched
-# geometry is rejected instead of corrupting the board.
+# fixed-geometry helpers capture exactly WIDTH * HEIGHT entries; the
+# state helpers additionally carry the runtime height so a Tower board can
+# cross a snapshot boundary and be rebuilt at its current size. A restore
+# with mismatched geometry is rejected instead of corrupting the board.
 
 func snapshot_cells() -> PackedInt32Array:
 	return _cells.duplicate()
@@ -146,6 +219,27 @@ func restore_cells(cells: PackedInt32Array) -> bool:
 	if cells.size() != WIDTH * HEIGHT:
 		return false
 	_cells = cells.duplicate()
+	return true
+
+
+func snapshot_state() -> Dictionary:
+	## Geometry-aware capture: the runtime height travels with the cells.
+	return {"h": HEIGHT, "cells": _cells.duplicate()}
+
+
+func restore_state(state) -> bool:
+	## Applies a geometry-aware snapshot. Heights below the default
+	## construction are rejected: boards never shrink.
+	if not (state is Dictionary):
+		return false
+	var h: int = int((state as Dictionary).get("h", -1))
+	var raw = (state as Dictionary).get("cells", null)
+	if h < DEFAULT_HEIGHT or not (raw is PackedInt32Array):
+		return false
+	if (raw as PackedInt32Array).size() != WIDTH * h:
+		return false
+	HEIGHT = h
+	_cells = (raw as PackedInt32Array).duplicate()
 	return true
 
 

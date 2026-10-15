@@ -13,6 +13,9 @@ user_credentials.cfg
 
 # Exports
 Exports/
+
+# Local dev launcher (relay endpoint lives here; never commit)
+launch_online_dev.ps1
 export.cfg
 export_credentials.cfg
 *.pck

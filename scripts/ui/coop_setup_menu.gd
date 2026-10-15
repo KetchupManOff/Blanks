@@ -1,6 +1,7 @@
 extends CanvasLayer
-## Coop lobby: one to four join slots instead of a fixed player count. A
-## player claims a free pad by holding any button for three seconds (the
+## Local multiplayer lobby: one to four join slots instead of a fixed
+## player count. A
+## player claims a free pad by holding any button for two seconds (the
 ## claim tracker consumes the events, and the button must be released
 ## before the profile picker opens), or joins a slot with the keyboard.
 ## Every slot then picks or creates a profile - duplicates are rejected.
@@ -9,7 +10,6 @@ extends CanvasLayer
 ## plus device ids to the host. Everything routes through host commands.
 
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
-const CoopBindings = preload("res://scripts/input/coop_bindings.gd")
 const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const ThemeProfile = preload("res://scripts/ui/theme_profile.gd")
 const UiNavigation = preload("res://scripts/ui/ui_navigation.gd")
@@ -17,9 +17,18 @@ const ControllerClaim = preload("res://scripts/input/controller_claim.gd")
 
 const SLOT_ROWS: int = 4
 const ROW_MODE: int = 4
-const ROW_START: int = 5
-const ROW_BACK: int = 6
-const ROW_COUNT: int = 7
+const ROW_GARBAGE: int = 5
+const ROW_START: int = 6
+const ROW_BACK: int = 7
+const ROW_COUNT: int = 8
+## The lobby mode cycle: shared-board co-op plus the independent-board
+## competitive modes.
+const MODE_CYCLE: Array = [
+	ModeRules.Mode.MARATHON,
+	ModeRules.Mode.SPRINT,
+	ModeRules.Mode.CLASSIC_VERSUS,
+	ModeRules.Mode.TOWER,
+]
 
 var _host: Node = null
 var _root: Control = null
@@ -28,7 +37,6 @@ var _panel: PanelContainer = null
 var _title: Label = null
 var _subtitle: Label = null
 var _rows: Array[Label] = []
-var _summary: Label = null
 var _pads: Label = null
 var _nav: UiNavigation = UiNavigation.new()
 var _claim: Node = null
@@ -37,6 +45,8 @@ var _claim: Node = null
 ## Initialized up front: theme application refreshes before _ready runs.
 var slots: Array = [{}, {}, {}, {}]
 var game_mode: int = ModeRules.Mode.MARATHON
+## Versus lobby garbage switch (host decision, retained across retries).
+var garbage_on: bool = true
 var _selected: int = 0
 var _claim_slot: int = -1
 var _armed_remove: int = -1
@@ -96,7 +106,7 @@ func _build() -> void:
 	_panel.add_child(box)
 
 	_title = Label.new()
-	_title.text = "CO-OP LOBBY"
+	_title.text = "LOCAL MULTIPLAYER"
 	_title.add_theme_font_size_override("font_size", 40)
 	_title.add_theme_color_override("font_color", _tokens["theme.text"])
 	_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -126,13 +136,6 @@ func _build() -> void:
 	var spacer2 := Control.new()
 	spacer2.custom_minimum_size = Vector2(0.0, 18.0)
 	box.add_child(spacer2)
-
-	_summary = Label.new()
-	_summary.add_theme_font_size_override("font_size", 15)
-	_summary.add_theme_color_override("font_color", _tokens["theme.dim"])
-	_summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_apply_font_override(_summary, _font)
-	box.add_child(_summary)
 
 	_pads = Label.new()
 	_pads.add_theme_font_size_override("font_size", 15)
@@ -177,11 +180,9 @@ func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 	_bg.color = _tokens["menu.scrim"]
 	_title.add_theme_color_override("font_color", _tokens["theme.text"])
 	_subtitle.add_theme_color_override("font_color", _tokens["theme.dim"])
-	_summary.add_theme_color_override("font_color", _tokens["theme.dim"])
 	_pads.add_theme_color_override("font_color", _tokens["theme.dim"])
 	_apply_font_override(_title, _title_font)
 	_apply_font_override(_subtitle, _font)
-	_apply_font_override(_summary, _font)
 	_apply_font_override(_pads, _font)
 	for label in _rows:
 		_apply_font_override(label, _font)
@@ -326,43 +327,87 @@ func _on_claim_cancelled() -> void:
 
 # ---------------------------------------------------------------- rendering
 
+func min_players_for_mode() -> int:
+	## Competitive modes are versus matches: they need at least two joined
+	## profiles. Shared-board co-op keeps the one-player team option.
+	return 2 if ModeRules.is_competitive(game_mode) else 1
+
+
 func _refresh() -> void:
 	if _rows.is_empty():
 		return
 	var mode_name: String = ModeRules.mode_display_name(game_mode)
+	var show_garbage: bool = game_mode == ModeRules.Mode.CLASSIC_VERSUS
 	for i in SLOT_ROWS:
 		_rows[i].text = "%s  %s" % [_marker(i), _slot_text(i)]
 	_rows[ROW_MODE].text = "%s  MODE:  %s" % [_marker(ROW_MODE), mode_name]
-	var ready_to_start: bool = joined_count() > 0
+	if show_garbage:
+		_rows[ROW_GARBAGE].text = "%s  GARBAGE:  %s" % [_marker(ROW_GARBAGE), "ON" if garbage_on else "OFF"]
+	else:
+		_rows[ROW_GARBAGE].text = ""
+	var ready_to_start: bool = joined_count() >= min_players_for_mode()
 	_rows[ROW_START].text = "%s  START RUN" % _marker(ROW_START)
 	_rows[ROW_BACK].text = "%s  BACK" % [_marker(ROW_BACK)]
 	for i in ROW_COUNT:
-		var color: Color = _tokens["menu.focus"] if i == _selected else _tokens["theme.dim"]
-		if i == ROW_START and not ready_to_start:
-			color = _tokens["theme.dim"]
+		var row_selectable: bool = i != ROW_GARBAGE or show_garbage
+		if i == ROW_START:
+			row_selectable = ready_to_start
+		var color: Color = _tokens["menu.focus"] if i == _selected and row_selectable else _tokens["theme.dim"]
 		_rows[i].add_theme_color_override("font_color", color)
 
-	_subtitle.text = "Hold any pad button 3s to join    A / Enter: select    B / Esc: back"
-	var lines: Array[String] = []
-	for i in CoopBindings.MAX_PLAYERS:
-		lines.append("P%d  %s" % [i + 1, CoopBindings.keyboard_summary(i)])
-	_summary.text = "\n".join(lines)
+	_subtitle.text = "Hold any pad button 2s to join    A / Enter: select    B / Esc: back"
 
 	var info: Array[String] = []
 	if _claim != null and _claim.active and _claim_slot < 0:
 		var progress: int = int(round(_claim.progress() * 100.0))
 		info.append("Claiming a pad: %d%%" % progress)
-	var pads_connected: int = CoopBindings.connected_joypad_count()
+	var pads_connected: int = Input.get_connected_joypads().size()
 	info.append("Pads connected: %d" % pads_connected)
+	var conflict := _shared_keyboard_conflict()
+	if not conflict.is_empty():
+		info.append(conflict)
 	if joined_count() == 0:
 		info.append("Waiting for players - at least one joined profile starts the run")
+	elif joined_count() < min_players_for_mode():
+		info.append("%s needs at least two joined profiles" % mode_name)
 	_pads.text = "\n".join(info)
+
+
+## Local co-op configuration warning: profiles sharing any keyboard record
+## on one machine both react to the same key (online peers sit behind
+## separate machines, so cross-profile duplicates stay valid there).
+func _shared_keyboard_conflict() -> String:
+	var joined: Array = []
+	for slot in slots:
+		if not slot.is_empty() and not String(slot.get("profile_id", "")).is_empty():
+			joined.append(slot)
+	for i in joined.size():
+		var mine: Array = _keyboard_records(String(joined[i]["profile_id"]))
+		for j in range(i + 1, joined.size()):
+			var other: Array = _keyboard_records(String(joined[j]["profile_id"]))
+			for record_a in mine:
+				for record_b in other:
+					if DefaultBindings.record_matches(record_a, record_b):
+						return (
+							"WARNING: P%d and P%d share a keyboard binding - one key drives both slots"
+							% [i + 1, j + 1]
+						)
+	return ""
+
+
+func _keyboard_records(profile_id: String) -> Array:
+	var bindings: Dictionary = _host.settings.keyboard_bindings_for(profile_id)
+	var records: Array = []
+	for action in bindings:
+		for record in bindings[action]:
+			records.append(record)
+	return records
 
 
 func _slot_text(i: int) -> String:
 	var slot: Dictionary = slots[i]
 	if slot.is_empty():
-		return "P%d  - hold a pad button 3s / Enter: keyboard join" % (i + 1)
+		return "P%d  - hold a pad button 2s / Enter: keyboard join" % (i + 1)
 	var device := int(slot.get("device", -1))
 	var source := "PAD %d" % device if device >= 0 else "KEYBOARD"
 	if String(slot.get("profile_id", "")).is_empty():
@@ -437,7 +482,7 @@ func _move(delta: int) -> void:
 	var next := _selected
 	for i in ROW_COUNT:
 		next = wrapi(next + delta, 0, ROW_COUNT)
-		if next != ROW_START or joined_count() > 0:
+		if _row_selectable(next):
 			break
 	_selected = next
 	if _armed_remove != _selected:
@@ -446,34 +491,52 @@ func _move(delta: int) -> void:
 	_refresh()
 
 
+func _row_selectable(row: int) -> bool:
+	if row == ROW_START:
+		return joined_count() >= min_players_for_mode()
+	if row == ROW_GARBAGE:
+		return game_mode == ModeRules.Mode.CLASSIC_VERSUS
+	return true
+
+
 func _activate() -> void:
 	match _selected:
 		ROW_MODE:
 			_adjust_mode(1)
+		ROW_GARBAGE:
+			if game_mode == ModeRules.Mode.CLASSIC_VERSUS:
+				garbage_on = not garbage_on
+				_play_nav_sfx("menu_move")
+				_refresh()
 		ROW_START:
-			if joined_count() > 0:
+			if joined_count() >= min_players_for_mode():
 				_play_nav_sfx("menu_confirm")
-				_host.cmd_start_coop(_assignments(), game_mode)
+				_host.cmd_start_coop(_assignments(), game_mode, garbage_on)
 			else:
-				_pads.text = "At least one joined profile is required"
+				_pads.text = (
+					"At least two joined profiles are required"
+					if ModeRules.is_competitive(game_mode)
+					else "At least one joined profile is required"
+				)
 		ROW_BACK:
 			_back()
 		_:
-			var slot: Dictionary = slots[_selected]
-			if slot.is_empty():
-				# Keyboard join: pick a profile for this slot without a pad.
-				_play_nav_sfx("menu_confirm")
-				if _claim != null:
-					_claim.stop()
-				_host.cmd_lobby_open_profile_picker(_selected)
-			elif String(slot.get("profile_id", "")).is_empty():
-				_pads.text = "Release the claimed pad button first"
-			elif _armed_remove == _selected:
-				_remove_slot(_selected)
-			else:
-				_armed_remove = _selected
-				_pads.text = "Press A / Enter again to remove %s" % String(slot.get("name", ""))
-				_refresh()
+			if _selected < SLOT_ROWS:
+				var slot: Dictionary = slots[_selected]
+				if slot.is_empty():
+					# Keyboard join: pick a profile for this slot without a pad.
+					_play_nav_sfx("menu_confirm")
+					if _claim != null:
+						_claim.stop()
+					_host.cmd_lobby_open_profile_picker(_selected)
+				elif String(slot.get("profile_id", "")).is_empty():
+					_pads.text = "Release the claimed pad button first"
+				elif _armed_remove == _selected:
+					_remove_slot(_selected)
+				else:
+					_armed_remove = _selected
+					_pads.text = "Press A / Enter again to remove %s" % String(slot.get("name", ""))
+					_refresh()
 
 
 func _remove_slot(index: int) -> void:
@@ -490,13 +553,18 @@ func _remove_slot(index: int) -> void:
 func _adjust(delta: int) -> void:
 	if _selected == ROW_MODE:
 		_adjust_mode(delta)
+	elif _selected == ROW_GARBAGE and game_mode == ModeRules.Mode.CLASSIC_VERSUS:
+		garbage_on = delta > 0
+		_play_nav_sfx("menu_move")
+		_refresh()
 
 
-func _adjust_mode(_delta: int) -> void:
-	if game_mode == ModeRules.Mode.MARATHON:
-		game_mode = ModeRules.Mode.SPRINT
-	else:
-		game_mode = ModeRules.Mode.MARATHON
+func _adjust_mode(delta: int) -> void:
+	var idx: int = MODE_CYCLE.find(game_mode)
+	if idx < 0:
+		idx = 0
+	idx = wrapi(idx + (1 if delta >= 0 else -1), 0, MODE_CYCLE.size())
+	game_mode = int(MODE_CYCLE[idx])
 	_refresh()
 	_play_nav_sfx("menu_move")
 

@@ -36,6 +36,10 @@ var _items: Array = []  # {"label": String, "callback": Callable}
 var _labels: Array[Label] = []
 var _selected: int = 0
 var _last_service_state: int = -1
+# Item-structure key (mode, role, garbage): rebuilding on every roster
+# twitch would reset the selection, so the list only rebuilds when the
+# lobby's visible rows actually change.
+var _lobby_structure: String = ""
 var _nav: UiNavigation = UiNavigation.new()
 var _tokens: Dictionary = ThemeProfile.default_tokens()
 var _font: Font = null
@@ -168,8 +172,8 @@ func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 
 func open_entry() -> void:
 	_mode = ScreenMode.ENTRY
-	_title.text = "ONLINE CO-OP"
-	_detail.text = "Relay-backed online co-op\nCreate a room and share its code, or join with a code"
+	_title.text = "ONLINE MULTIPLAYER"
+	_detail.text = "Relay-backed online multiplayer\nCreate a room and share its code, or join with a code"
 	_code_edit.visible = false
 	_code_edit.text = ""
 	_set_items(_entry_items())
@@ -179,13 +183,21 @@ func open_entry() -> void:
 
 func open_lobby() -> void:
 	_mode = ScreenMode.LOBBY
-	_title.text = "ONLINE LOBBY"
+	_title.text = "ONLINE MULTIPLAYER LOBBY"
 	_code_edit.visible = false
 	_code_edit.text = ""
+	_lobby_structure = ""
 	_set_items(_lobby_items())
+	_lobby_structure = _structure_key()
 	visible = true
 	refresh_status()
 	_refresh_roster()
+
+
+func _structure_key() -> String:
+	if _service == null:
+		return ""
+	return "%d|%s|%s" % [int(_service.lobby_mode), bool(_service.is_host), bool(_service.lobby_garbage)]
 
 
 func open_code() -> void:
@@ -235,10 +247,17 @@ func _lobby_items() -> Array:
 	if _service == null:
 		return items
 	var is_host: bool = bool(_service.is_host)
+	var mode: int = int(_service.lobby_mode)
 	if is_host:
-		items.append(_item("MODE: %s" % _mode_label(int(_service.lobby_mode)), Callable(_host, "cmd_online_mode_next")))
+		items.append(_item("MODE: %s" % _mode_label(mode), Callable(_host, "cmd_online_mode_next")))
 	else:
-		items.append(_item("MODE: %s  (HOST SETS)" % _mode_label(int(_service.lobby_mode)), Callable()))
+		items.append(_item("MODE: %s  (HOST SETS)" % _mode_label(mode), Callable()))
+	if mode == ModeRules.Mode.CLASSIC_VERSUS:
+		# The garbage switch is a Versus-only host decision.
+		if is_host:
+			items.append(_item("GARBAGE: %s" % ("ON" if bool(_service.lobby_garbage) else "OFF"), Callable(_host, "cmd_online_toggle_garbage")))
+		else:
+			items.append(_item("GARBAGE: %s  (HOST SETS)" % ("ON" if bool(_service.lobby_garbage) else "OFF"), Callable()))
 	if not is_host:
 		# Clients toggle their own ready flag; the host is implicitly ready.
 		items.append(_item("TOGGLE READY", Callable(_host, "cmd_online_toggle_ready")))
@@ -252,6 +271,8 @@ func _mode_label(mode: int) -> String:
 	match mode:
 		ModeRules.Mode.MARATHON: return "MARATHON"
 		ModeRules.Mode.SPRINT: return "40-LINE SPRINT"
+		ModeRules.Mode.CLASSIC_VERSUS: return "CLASSIC VERSUS"
+		ModeRules.Mode.TOWER: return "TOWER"
 		_: return "MODE %d" % mode
 
 
@@ -310,12 +331,15 @@ func _refresh_roster() -> void:
 
 
 func _refresh_lobby_detail() -> void:
-	# The host's room code stays prominently visible in the lobby; the
-	# status line may be overwritten by transient events.
-	if bool(_service.is_host):
-		_detail.text = "ROOM CODE: %s\nShare it - players join with JOIN ROOM" % String(_service.session_code())
+	# The relay gives every peer the canonical code, so any lobby member can
+	# invite another player even when the host is not the one sharing it.
+	var code := String(_service.session_code())
+	if code.is_empty():
+		_detail.text = "WAITING FOR THE ROOM CODE"
+	elif bool(_service.is_host):
+		_detail.text = "ROOM CODE: %s\nShare it - players join with JOIN ROOM" % code
 	else:
-		_detail.text = "WAITING FOR THE HOST TO START"
+		_detail.text = "ROOM CODE: %s\nShare it - waiting for the host to start" % code
 
 
 func _process(_delta: float) -> void:
@@ -348,13 +372,16 @@ func _on_status_changed(text: String) -> void:
 func _on_lobby_changed() -> void:
 	if _mode == ScreenMode.LOBBY:
 		_refresh_roster()
+		if _structure_key() != _lobby_structure:
+			_lobby_structure = _structure_key()
+			_set_items(_lobby_items())
 
 
 func _on_state_changed() -> void:
 	## Screen transitions driven by the service: create/join completion
 	## swaps the entry/code screens for the lobby. Round-end LOBBY
-	## transitions are excluded - the results overlay owns that flow
-	## until the host returns everyone to the lobby.
+	## transitions are excluded - each peer's results overlay owns that flow
+	## until that player returns to the lobby.
 	if _service == null:
 		return
 	var current: int = int(_service.state)

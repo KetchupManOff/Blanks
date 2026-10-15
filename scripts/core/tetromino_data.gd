@@ -8,6 +8,10 @@ extends RefCounted
 enum Kind { I, O, T, S, Z, J, L }
 
 const EMPTY: int = -1
+## Versus garbage cell kind: never a tetromino, never spawns or rotates.
+## Only the independent-board competitive core creates these cells; its
+## renderer draws them with a dedicated garbage color.
+const GARBAGE: int = 7
 
 # Box size per kind (I uses 4x4, O uses 2x2, everything else 3x3).
 const BOX_SIZE := {

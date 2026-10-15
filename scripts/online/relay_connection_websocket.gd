@@ -30,7 +30,7 @@ var _last_pong_msec: int = 0
 func is_active() -> bool:
 	if _local_closed:
 		return false
-	return _sock.get_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]
+	return _sock.get_ready_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]
 
 
 func create_room(url: String) -> bool:
@@ -42,16 +42,16 @@ func join_room(url: String, code: String) -> bool:
 
 
 func send(payload: PackedByteArray) -> bool:
-	if _mode != MODE_ROOM or _sock.get_state() != WebSocketPeer.STATE_OPEN:
+	if _mode != MODE_ROOM or _sock.get_ready_state() != WebSocketPeer.STATE_OPEN:
 		return false
 	return _sock.put_packet(payload) == OK
 
 
 func poll(_delta: float) -> void:
-	if _local_closed and _sock.get_state() == WebSocketPeer.STATE_CLOSED:
+	if _local_closed and _sock.get_ready_state() == WebSocketPeer.STATE_CLOSED:
 		return
 	_sock.poll()
-	match _sock.get_state():
+	match _sock.get_ready_state():
 		WebSocketPeer.STATE_CONNECTING:
 			if Time.get_ticks_msec() > _connect_deadline_msec:
 				_fail("timeout", "Relay connection timed out")
@@ -69,7 +69,7 @@ func poll(_delta: float) -> void:
 func close() -> void:
 	if _local_closed:
 		return
-	if _mode == MODE_ROOM and peer_id == 1 and _sock.get_state() == WebSocketPeer.STATE_OPEN:
+	if _mode == MODE_ROOM and peer_id == 1 and _sock.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		# Host: prompt the relay to notify members and delete the room
 		# promptly instead of waiting for our socket close to be noticed.
 		_send_json({"op": "close"})
@@ -77,7 +77,7 @@ func close() -> void:
 	_mode = MODE_IDLE
 	room_code = ""
 	peer_id = 0
-	if _sock.get_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
+	if _sock.get_ready_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
 		_sock.close()
 	closed.emit("local")
 
@@ -155,7 +155,7 @@ func _fail(error_code: String, message: String) -> void:
 	## and surface exactly one failure signal.
 	_mode = MODE_IDLE
 	_local_closed = true
-	if _sock.get_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
+	if _sock.get_ready_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
 		_sock.close()
 	room_failed.emit(error_code, message)
 
@@ -165,7 +165,7 @@ func _accept_room_closed(reason: String) -> void:
 	_local_closed = true
 	room_code = ""
 	peer_id = 0
-	if _sock.get_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
+	if _sock.get_ready_state() in [WebSocketPeer.STATE_CONNECTING, WebSocketPeer.STATE_OPEN]:
 		_sock.close()
 	room_closed.emit(reason)
 
@@ -197,6 +197,6 @@ func _heartbeat(delta: float) -> void:
 
 
 func _send_json(obj: Dictionary) -> bool:
-	if _sock.get_state() != WebSocketPeer.STATE_OPEN:
+	if _sock.get_ready_state() != WebSocketPeer.STATE_OPEN:
 		return false
 	return _sock.send_text(JSON.stringify(obj)) == OK

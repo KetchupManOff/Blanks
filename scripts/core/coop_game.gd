@@ -68,6 +68,11 @@ var score: int = 0
 var lines: int = 0
 var level: int = 1
 var last_event_player: int = -1
+# Authoritative event revision: advances exactly when a lock event is
+# created. Snapshot rebuilds on clients carry it inside every event so
+# audio/HUD edge detection identifies host events without comparing local
+# instance ids (a rebuilt twin event never looks fresh).
+var event_revision: int = 0
 
 
 func _init(game_player_count: int = 1, game_mode: int = ModeRules.Mode.MARATHON, game_seed: int = 0) -> void:
@@ -233,7 +238,7 @@ func hard_drop(player: int) -> bool:
 		p.piece_y = target_y
 		score += distance * PlayConfig.HARD_DROP_POINTS_PER_CELL
 		p.spin_ready = false
-	_lock_piece(p)
+	_lock_piece(p, true)
 	return true
 
 
@@ -294,7 +299,7 @@ func _spawn_from_queue(p: PlayerState, reset_hold: bool) -> void:
 
 # --------------------------------------------------------------------- lock
 
-func _lock_piece(p: PlayerState) -> void:
+func _lock_piece(p: PlayerState, from_hard_drop: bool = false) -> void:
 	var cells: Array = current_cells(p.index)
 	var kind: int = p.piece_kind
 	board.place(cells, kind)
@@ -325,6 +330,9 @@ func _lock_piece(p: PlayerState) -> void:
 	event.tspin = tspin
 	event.tspin_mini_upgraded = upgraded
 	event.level = level
+	event.rev = event_revision + 1
+	event.hard_drop = from_hard_drop
+	event_revision += 1
 
 	if not cleared.is_empty():
 		var difficult: bool = Scoring.is_difficult(tspin, cleared.size())
@@ -498,7 +506,10 @@ func to_snapshot() -> Dictionary:
 		var event_snap: Dictionary = {}
 		if p.last_event != null:
 			# Plain-data copy of the scoring ClearEvent: clients render the
-			# same event/combo HUD lines from it.
+			# same event/combo HUD lines from it. The authoritative revision
+			# identifies the host event across snapshot rebuilds; hard_drop
+			# lets client audio edges suppress the plain lock after the drop
+			# sound already played optimistically.
 			event_snap = {
 				"lines": p.last_event.lines,
 				"tspin": p.last_event.tspin,
@@ -511,6 +522,8 @@ func to_snapshot() -> Dictionary:
 				"perfect_clear": p.last_event.perfect_clear,
 				"pc_points": p.last_event.pc_points,
 				"total_points": p.last_event.total_points,
+				"rev": p.last_event.rev,
+				"hard_drop": p.last_event.hard_drop,
 			}
 		players_out.append({
 			"index": p.index,
@@ -618,8 +631,10 @@ func apply_snapshot(snap) -> bool:
 		if event_snap.is_empty():
 			p.last_event = null
 		else:
-			# Rebuild the event object so the HUD/audio edge detectors keep
-			# observing fresh instance ids per host event.
+			# Rebuild the event object carrying the host's authoritative
+			# revision: the twin never ticks, so its event ids stay stable
+			# and the HUD/audio edge detectors identify host events by
+			# revision instead of local instance ids.
 			var event: Scoring.ClearEvent = Scoring.ClearEvent.new()
 			event.lines = int(event_snap.get("lines", 0))
 			event.tspin = int(event_snap.get("tspin", Scoring.TSpinGrade.NONE))
@@ -632,6 +647,9 @@ func apply_snapshot(snap) -> bool:
 			event.perfect_clear = bool(event_snap.get("perfect_clear", false))
 			event.pc_points = int(event_snap.get("pc_points", 0))
 			event.total_points = int(event_snap.get("total_points", 0))
+			event.rev = int(event_snap.get("rev", 0))
+			event.hard_drop = bool(event_snap.get("hard_drop", false))
 			p.last_event = event
+			event_revision = maxi(event_revision, event.rev)
 
 	return board.restore_cells(cells)
