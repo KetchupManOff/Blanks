@@ -26,7 +26,7 @@ themes, open-file music and sound effects, and a deliberately testable core.
 
 ## Getting started
 
-### Support My Open-Source Projects ☕
+## Support My Open-Source Projects ☕
 
 I build and maintain open-source projects because I love creating useful tools and sharing them with everyone.
 
@@ -43,7 +43,7 @@ Everything stays open source. No pressure, no paywalls. Just free tools, creativ
 
 Every contribution is appreciated, no matter the amount. And if you can't contribute financially, using my projects, sharing them, reporting bugs, or contributing to the code already means a lot to me.
 
-☕ Support my work on Ko-fi: https://ko-fi.com/yankdufn
+☕ **Support my work on Ko-fi: https://ko-fi.com/yankdufn **
 
 
 ## Play a packaged build
