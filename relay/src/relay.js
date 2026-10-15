@@ -1,4 +1,4 @@
-// Forwarding-only WebSocket relay for Tetris Yank Edition online co-op.
+// Forwarding-only WebSocket relay for BLANKS online co-op.
 //
 // The relay never decodes gameplay payloads: it creates private rooms
 // addressed by high-entropy codes, assigns relay peer ids (host 1,

@@ -1,4 +1,4 @@
-# tye-relay deployment example.
+# blanks-relay deployment example.
 #
 # Plain (no TLS - suitable only behind an existing TLS terminator):
 #   docker compose up -d --build

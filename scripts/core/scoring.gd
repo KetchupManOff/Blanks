@@ -43,7 +43,7 @@ class ClearEvent:
 			3:
 				text += "TRIPLE"
 			4:
-				text += "TETRIS"
+				text += "BLANKS"
 		if lines == 0 and tspin == TSpinGrade.NONE:
 			return ""
 		if b2b_applied:
@@ -52,7 +52,7 @@ class ClearEvent:
 
 
 static func is_difficult(tspin: int, lines: int) -> bool:
-	# Back-to-back chain covers Tetris and T-Spin line clears.
+	# Back-to-back chain covers BLANKS and T-Spin line clears.
 	return lines >= 1 and (lines == 4 or tspin != TSpinGrade.NONE)
 
 
@@ -69,7 +69,7 @@ static func base_points(tspin: int, lines: int, level: int) -> int:
 			3:
 				base = PlayConfig.SCORE_TSPIN_TRIPLE
 			_:
-				base = PlayConfig.SCORE_TETRIS
+				base = PlayConfig.SCORE_BLANKS
 	elif tspin == TSpinGrade.MINI:
 		match lines:
 			0:
@@ -87,7 +87,7 @@ static func base_points(tspin: int, lines: int, level: int) -> int:
 			3:
 				base = PlayConfig.SCORE_TRIPLE
 			_:
-				base = PlayConfig.SCORE_TETRIS
+				base = PlayConfig.SCORE_BLANKS
 	return base * level
 
 
@@ -109,5 +109,5 @@ static func perfect_clear_points(lines: int, level: int) -> int:
 		3:
 			base = PlayConfig.PC_TRIPLE
 		_:
-			base = PlayConfig.PC_TETRIS
+			base = PlayConfig.PC_BLANKS
 	return base * level

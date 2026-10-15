@@ -62,11 +62,11 @@ const MAX_NAME_LENGTH: int = 16
 
 # Product relay endpoint - one non-secret setting, no credentials: the
 # project setting is the release default (set it before exporting; it
-# must be wss://), and the TYE_RELAY_URL environment variable overrides
+# must be wss://), and the BLANKS_RELAY_URL environment variable overrides
 # it for development and staging (ws:// is accepted only in debug
 # builds; releases require TLS).
 const PROJECT_RELAY_URL: String = "online/relay_url"
-const RELAY_URL_ENV: String = "TYE_RELAY_URL"
+const RELAY_URL_ENV: String = "BLANKS_RELAY_URL"
 
 # Transport-safe snapshot chunking: bounds every forwarded frame well
 # below the relay packet limit.

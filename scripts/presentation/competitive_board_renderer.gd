@@ -48,7 +48,7 @@ var _skins: Dictionary = {}
 var _dither := "none"
 var _dither_strength := 0.0
 
-var _tower_profile_enabled := OS.has_environment("TETRIS_PROFILE_TOWER")
+var _tower_profile_enabled := OS.has_environment("BLANKS_PROFILE_TOWER")
 var _tower_profile_started_usec: int = 0
 var _tower_profile_frames: int = 0
 var _tower_profile_draw_usec: int = 0
@@ -212,7 +212,7 @@ func _draw() -> void:
 
 
 ## Opt-in renderer timing for diagnosing Tower scaling without affecting
-## normal runs. Set TETRIS_PROFILE_TOWER=1 before launching the game.
+## normal runs. Set BLANKS_PROFILE_TOWER=1 before launching the game.
 func _record_tower_profile(width: int, height: int, draw_usec: int, locked_usec: int, ghost_usec: int) -> void:
 	var now_usec := Time.get_ticks_usec()
 	if _tower_profile_started_usec == 0:

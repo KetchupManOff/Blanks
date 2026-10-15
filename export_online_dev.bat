@@ -8,10 +8,10 @@ cd /d "%~dp0"
 
 rem Timestamp like 2026-10-04_16-10-07: locale-independent, filename-safe.
 for /f "delims=" %%T in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm-ss"') do set "TIMESTAMP=%%T"
-set "NAME=TetrisYankEdition_OnlineDev_%TIMESTAMP%"
+set "NAME=BLANKS_OnlineDev_%TIMESTAMP%"
 
 echo.
-echo ---- Tetris Yank Edition online dev export ---------------
+echo ---- BLANKS online dev export ----------------------------
 echo Build name: %NAME%
 echo Debug build: this package may use plain ws:// relays.
 echo ---------------------------------------------------------

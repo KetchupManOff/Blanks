@@ -286,7 +286,7 @@ machine without Godot installed.
 - [ ] During the clear flash every player freezes, then survivors resume and
       the locker receives its next piece.
 - [ ] Score, lines, level, and the timer are shared team totals; the event
-      label shows which player scored (e.g. "P2  TETRIS +800").
+      label shows which player scored (e.g. "P2  BLANKS +800").
 - [ ] Any player topping out ends the team run immediately; Sprint finishes
       when the shared line total reaches 40 no matter who cleared it.
 - [ ] Eligible team results record once into every participating profile

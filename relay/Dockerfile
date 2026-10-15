@@ -1,4 +1,4 @@
-# Minimal production image for the tye-relay service.
+# Minimal production image for the blanks-relay service.
 FROM node:22-alpine
 
 WORKDIR /app

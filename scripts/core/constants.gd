@@ -3,7 +3,7 @@ extends RefCounted
 ## All timing values are in seconds. Presentation and input layers read these
 ## so future tuning only touches this file.
 
-const RULESET_ID: String = "yank-edition-rules-1"
+const RULESET_ID: String = "blanks-rules-1"
 const SAVE_FORMAT_VERSION: int = 1
 
 # --- Simulation ---
@@ -32,7 +32,7 @@ const LINES_PER_LEVEL: int = 10
 const SCORE_SINGLE: int = 100
 const SCORE_DOUBLE: int = 300
 const SCORE_TRIPLE: int = 500
-const SCORE_TETRIS: int = 800
+const SCORE_BLANKS: int = 800
 const SCORE_TSPIN_ZERO: int = 400
 const SCORE_TSPIN_SINGLE: int = 800
 const SCORE_TSPIN_DOUBLE: int = 1200
@@ -49,4 +49,4 @@ const HARD_DROP_POINTS_PER_CELL: int = 2
 const PC_SINGLE: int = 800
 const PC_DOUBLE: int = 1200
 const PC_TRIPLE: int = 1800
-const PC_TETRIS: int = 2000
+const PC_BLANKS: int = 2000

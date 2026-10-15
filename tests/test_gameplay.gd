@@ -245,7 +245,7 @@ func test_multi_line_clear_counts_all() -> void:
 	check_eq(game.score, 300, "double clear scores 300")
 
 
-func test_tetris_clear() -> void:
+func test_blanks_clear() -> void:
 	var game := _new_game()
 	# A bystander block in the hidden row keeps this from being a perfect clear.
 	game.debug_set_cell(9, 0, K.J)
@@ -256,8 +256,8 @@ func test_tetris_clear() -> void:
 	fill_row_except(game, 18, [3, 4, 5, 6], K.J)
 	game.debug_spawn_piece(K.I, 3, 17, 0)
 	game.hard_drop()
-	check_eq(game.lines, 4, "tetris counts four lines")
-	check_eq(game.score, 800, "tetris scores 800 at level 1")
+	check_eq(game.lines, 4, "blanks clear counts four lines")
+	check_eq(game.score, 800, "blanks clear scores 800 at level 1")
 	check_eq(game.level, 1, "level unchanged below ten lines")
 
 

@@ -45,7 +45,7 @@ static func attack_lines(tspin: int, lines: int, combo: int, b2b_applied: bool) 
 			1: base = ModeRules.ATTACK_SINGLE
 			2: base = ModeRules.ATTACK_DOUBLE
 			3: base = ModeRules.ATTACK_TRIPLE
-			4: base = ModeRules.ATTACK_TETRIS
+			4: base = ModeRules.ATTACK_BLANKS
 			_: base = 0
 	var bonus: int = maxi(0, combo) + (1 if b2b_applied else 0)
 	return base + bonus

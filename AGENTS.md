@@ -2,7 +2,8 @@
 
 ## Project
 
-Godot 4.7 GDScript project ("Tetris Yank Edition"). Everything is
+Godot 4.7 GDScript project ("BLANKS" - Blocks + Yank. Clear a line.
+Create a blank.). Everything is
 code-built UI - avoid inventing `.tscn` files except where they are
 just script holders (see `scenes/`).
 

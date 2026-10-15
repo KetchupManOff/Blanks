@@ -8,9 +8,9 @@ only carry the engine and the game code.
 ## Layout
 
 ```text
-TetrisYankEdition/
-├─ TetrisYankEdition.exe    game and engine
-├─ TetrisYankEdition.pck    code and scenes (keep next to the exe)
+BLANKS/
+├─ BLANKS.exe    game and engine
+├─ BLANKS.pck    code and scenes (keep next to the exe)
 ├─ music/                   gameplay and menu soundtrack
 ├─ sfx/                     gameplay and UI sounds
 ├─ themes/                  visual themes

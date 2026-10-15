@@ -120,8 +120,8 @@ override for development and staging:
 - **Release**: set `[online] relay_url` in `project.godot` to your
   deployed `wss://` URL before exporting (a release build refuses a
   plain `ws://` endpoint).
-- **Development/staging**: launch with `TYE_RELAY_URL` set, e.g.
-  `TYE_RELAY_URL=ws://127.0.0.1:8080` against a locally running relay
+- **Development/staging**: launch with `BLANKS_RELAY_URL` set, e.g.
+  `BLANKS_RELAY_URL=ws://127.0.0.1:8080` against a locally running relay
   (`cd relay && npm install && npm start`). Plain `ws://` is accepted
   only in debug/editor builds; unset or invalid endpoints leave online
   unavailable with an actionable status line.
@@ -140,11 +140,11 @@ export_online_dev.bat
 
 - The script prompts for the relay URL (`ws://host:port`) and
   produces a timestamped
-  `Exports/TetrisYankEdition_OnlineDev_<timestamp>.zip`. The endpoint
+  `Exports/BLANKS_OnlineDev_<timestamp>.zip`. The endpoint
   is written only into the generated `Start Online Dev.bat` inside
   the package - never into tracked project files.
 - Recipients extract the zip anywhere and run **Start Online Dev.bat**
-  rather than the `.exe` directly: the launcher sets `TYE_RELAY_URL`
+  rather than the `.exe` directly: the launcher sets `BLANKS_RELAY_URL`
   for the game process, and without it the game reports online as
   unavailable.
 - The package is a **debug export**: it is unsigned, so Windows

@@ -1,6 +1,6 @@
-# tye-relay
+# blanks-relay
 
-Forwarding-only WebSocket relay for Tetris Yank Edition online co-op.
+Forwarding-only WebSocket relay for BLANKS online co-op.
 The relay is an availability component, not an authority: it creates
 private rooms addressed by high-entropy codes and moves frames between
 the host and the room's clients. The game host stays authoritative

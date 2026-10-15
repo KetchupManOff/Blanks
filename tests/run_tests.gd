@@ -51,7 +51,7 @@ func _run_all() -> void:
 	var total_failures: int = 0
 	var total_checks: int = 0
 	var total_tests: int = 0
-	print("=== Tetris Yank Edition headless test run ===")
+	print("=== BLANKS headless test run ===")
 	for suite_path in SUITES:
 		var suite_script: GDScript = load(suite_path)
 		if suite_script == null:

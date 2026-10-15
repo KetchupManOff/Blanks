@@ -1,4 +1,4 @@
-# Assembles the open-files Windows x64 package of Tetris Yank Edition: a
+# Assembles the open-files Windows x64 package of BLANKS: a
 # release build by default, or a debug "online dev" build for friend
 # testing against a plain-ws:// relay (-OnlineDev).
 #
@@ -6,14 +6,14 @@
 #   <Name>.exe + <Name>.pck   engine and game code (pck kept beside the exe)
 #   music/  sfx/  themes/      plain, player-editable files
 #   MODDING.md                 how to edit the above
-#   Start Online Dev.bat       -OnlineDev only: sets TYE_RELAY_URL for the
+#   Start Online Dev.bat       -OnlineDev only: sets BLANKS_RELAY_URL for the
 #                              game process and starts it
 # Plus Exports/<Name>.zip containing the same folder.
 #
 # Usage:
 #   .\package_release.ps1
-#   .\package_release.ps1 -Godot "C:\path\to\Godot_v4.7.2-stable_win64.exe" -Name "TetrisYankEdition-1.0.0"
-#   .\package_release.ps1 -OnlineDev -RelayUrl "ws://host:port" -Name "TetrisYankEdition-OnlineDev"
+#   .\package_release.ps1 -Godot "C:\path\to\Godot_v4.7.2-stable_win64.exe" -Name "BLANKS-1.0.0"
+#   .\package_release.ps1 -OnlineDev -RelayUrl "ws://host:port" -Name "BLANKS-OnlineDev"
 
 param(
     # Use the _console.exe build: it is a console-subsystem binary, so
@@ -22,11 +22,11 @@ param(
     # immediately, breaking import/export sequencing.
     [string]$Godot = "$env:LOCALAPPDATA\Programs\Godot\Godot_v4.7.2-stable_win64_console.exe",
     [string]$Preset = "Windows Desktop",
-    [string]$Name = "TetrisYankEdition",
+    [string]$Name = "BLANKS",
     [string]$OutDir = "Exports",
     # Online friend-test package: a debug export (the only build kind
     # allowed to use a plain ws:// relay) plus a generated launcher that
-    # starts the game with TYE_RELAY_URL set for it alone.
+    # starts the game with BLANKS_RELAY_URL set for it alone.
     [switch]$OnlineDev,
     # Relay endpoint, -OnlineDev only. Deliberately not persisted in any
     # tracked project file: it is written solely into the generated
@@ -138,7 +138,7 @@ rem .exe directly: without the environment override the game reports
 rem online as unavailable.
 setlocal
 cd /d "%~dp0"
-set "TYE_RELAY_URL=$RelayUrl"
+set "BLANKS_RELAY_URL=$RelayUrl"
 if not exist "%~dp0$Name.exe" (
     echo Game executable not found next to this launcher.
     pause

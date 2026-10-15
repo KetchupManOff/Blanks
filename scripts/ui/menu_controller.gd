@@ -201,10 +201,10 @@ func close() -> void:
 
 
 func show_main_menu(host: Node) -> void:
-	_detail.text = "CHOOSE A CATEGORY TO PLAY\nPROFILE: %s" % host.active_profile_name().to_upper()
+	_detail.text = "D-PAD / ARROWS: MOVE    A / ENTER: SELECT    B / ESC: BACK\nPROFILE: %s" % host.active_profile_name().to_upper()
 	open(
-		"TETRIS YANK EDITION",
-		"D-pad / Arrows: move    A / Enter: select    B / Esc: back",
+		"BLANKS",
+		"Blocks + Yank. Clear a line. Create a blank.",
 		[
 			make_item("SOLO", Callable(host, "cmd_open_solo_menu")),
 			make_item("LOCAL MULTIPLAYER", Callable(host, "cmd_open_coop_setup")),

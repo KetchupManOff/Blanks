@@ -27,7 +27,7 @@ func _clear_single(game: RefCounted) -> void:
 	game.tick(PlayConfig.LINE_CLEAR_DELAY + 0.01)
 
 
-func _clear_tetris(game: RefCounted) -> void:
+func _clear_blanks(game: RefCounted) -> void:
 	for y in [19, 20, 21]:
 		fill_row_except(game, y, [], K.J)
 	fill_row_except(game, 18, [3, 4, 5, 6], K.J)
@@ -45,7 +45,7 @@ func test_base_points_table() -> void:
 	check_eq(Scoring.base_points(TSPIN_NONE, 1, 1), 100, "single 100 x level")
 	check_eq(Scoring.base_points(TSPIN_NONE, 2, 1), 300, "double 300 x level")
 	check_eq(Scoring.base_points(TSPIN_NONE, 3, 1), 500, "triple 500 x level")
-	check_eq(Scoring.base_points(TSPIN_NONE, 4, 1), 800, "tetris 800 x level")
+	check_eq(Scoring.base_points(TSPIN_NONE, 4, 1), 800, "blanks 800 x level")
 	check_eq(Scoring.base_points(TSPIN_NONE, 2, 5), 1500, "double at level 5")
 	check_eq(Scoring.base_points(TSPIN_FULL, 0, 1), 400, "t-spin zero lines 400")
 	check_eq(Scoring.base_points(TSPIN_FULL, 1, 1), 800, "t-spin single 800")
@@ -60,7 +60,7 @@ func test_base_points_table() -> void:
 func test_difficult_clears() -> void:
 	check_false(Scoring.is_difficult(TSPIN_NONE, 1), "single is ordinary")
 	check_false(Scoring.is_difficult(TSPIN_NONE, 3), "triple is ordinary")
-	check_true(Scoring.is_difficult(TSPIN_NONE, 4), "tetris is difficult")
+	check_true(Scoring.is_difficult(TSPIN_NONE, 4), "blanks is difficult")
 	check_true(Scoring.is_difficult(TSPIN_FULL, 1), "t-spin single is difficult")
 	check_true(Scoring.is_difficult(TSPIN_MINI, 2), "mini double is difficult")
 	check_false(Scoring.is_difficult(TSPIN_FULL, 0), "zero-line t-spin is not a clear")
@@ -79,8 +79,8 @@ func test_perfect_clear_points_table() -> void:
 	check_eq(Scoring.perfect_clear_points(1, 1), 800, "PC single 800")
 	check_eq(Scoring.perfect_clear_points(2, 1), 1200, "PC double 1200")
 	check_eq(Scoring.perfect_clear_points(3, 1), 1800, "PC triple 1800")
-	check_eq(Scoring.perfect_clear_points(4, 1), 2000, "PC tetris 2000")
-	check_eq(Scoring.perfect_clear_points(4, 2), 4000, "PC tetris at level 2")
+	check_eq(Scoring.perfect_clear_points(4, 1), 2000, "PC blanks 2000")
+	check_eq(Scoring.perfect_clear_points(4, 2), 4000, "PC blanks at level 2")
 
 
 func test_combo_chain_in_game() -> void:
@@ -115,34 +115,34 @@ func test_back_to_back_chain() -> void:
 	var game := _new_game()
 	# Bystander block in the hidden row: avoids perfect-clear bonuses here.
 	game.debug_set_cell(9, 0, K.J)
-	_clear_tetris(game)
+	_clear_blanks(game)
 	var e1 = game.last_event
-	check_eq(e1.base_points, 800, "first tetris plain 800")
-	check_false(e1.b2b_applied, "no b2b on first tetris")
-	check_true(game.b2b_active, "tetris starts the b2b chain")
-	_clear_tetris(game)
+	check_eq(e1.base_points, 800, "first blanks clear plain 800")
+	check_false(e1.b2b_applied, "no b2b on first blanks clear")
+	check_true(game.b2b_active, "blanks clear starts the b2b chain")
+	_clear_blanks(game)
 	var e2 = game.last_event
-	check_true(e2.b2b_applied, "second tetris gets b2b")
-	check_eq(e2.base_points, 1200, "b2b tetris 800 x 1.5")
+	check_true(e2.b2b_applied, "second blanks clear gets b2b")
+	check_eq(e2.base_points, 1200, "b2b blanks 800 x 1.5")
 	check_eq(e2.combo_points, 50, "combo also runs during b2b")
-	check_eq(e2.total_points, 1250, "b2b tetris plus combo")
+	check_eq(e2.total_points, 1250, "b2b blanks plus combo")
 	_clear_single(game)
 	var e3 = game.last_event
 	check_false(e3.b2b_applied, "single does not get b2b")
 	check_eq(e3.base_points, 100, "single plain 100")
 	check_false(game.b2b_active, "single breaks the b2b chain")
-	_clear_tetris(game)
+	_clear_blanks(game)
 	var e4 = game.last_event
-	check_false(e4.b2b_applied, "tetris after broken chain is plain")
-	check_eq(e4.base_points, 800, "plain tetris after chain break")
+	check_false(e4.b2b_applied, "blanks clear after broken chain is plain")
+	check_eq(e4.base_points, 800, "plain blanks clear after chain break")
 
 
 func test_b2b_survives_non_clearing_locks() -> void:
 	var game := _new_game()
-	_clear_tetris(game)
+	_clear_blanks(game)
 	_no_clear_lock(game)
 	check_true(game.b2b_active, "lock without clear keeps b2b")
-	_clear_tetris(game)
+	_clear_blanks(game)
 	check_true(game.last_event.b2b_applied, "b2b applies across non-clearing locks")
 
 

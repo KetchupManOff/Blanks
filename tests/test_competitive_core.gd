@@ -40,7 +40,7 @@ func _fill_rows_except(game: RefCounted, player: int, y0: int, y1: int, except_c
 
 
 ## Drops a vertical I piece into `col`, completing every previously filled
-## row it spans (the classic deterministic Tetris/double/triple setup).
+## row it spans (the classic deterministic blanks/double/triple setup).
 func _drop_vertical_i(game: RefCounted, player: int, col: int = 9) -> void:
 	game.debug_spawn_piece(player, TetrominoData.Kind.I, col - 2, 0, 1)
 	game.hard_drop(player)
@@ -111,7 +111,7 @@ func test_attack_table() -> void:
 	check_eq(CompetitiveGame.attack_lines(none, 1, 0, false), 0, "single sends 0")
 	check_eq(CompetitiveGame.attack_lines(none, 2, 0, false), 1, "double sends 1")
 	check_eq(CompetitiveGame.attack_lines(none, 3, 0, false), 2, "triple sends 2")
-	check_eq(CompetitiveGame.attack_lines(none, 4, 0, false), 4, "tetris sends 4")
+	check_eq(CompetitiveGame.attack_lines(none, 4, 0, false), 4, "blanks clear sends 4")
 	var full: int = Scoring.TSpinGrade.FULL
 	check_eq(CompetitiveGame.attack_lines(full, 1, 0, false), 2, "t-spin single sends 2")
 	check_eq(CompetitiveGame.attack_lines(full, 2, 0, false), 4, "t-spin double sends 4")
@@ -126,13 +126,13 @@ func test_combo_and_b2b_attack_bonuses() -> void:
 	check_eq(CompetitiveGame.attack_lines(none, 1, 0, false), 0, "first clear of a combo sends no bonus")
 	check_eq(CompetitiveGame.attack_lines(none, 1, 1, false), 1, "second consecutive clear adds one")
 	check_eq(CompetitiveGame.attack_lines(none, 2, 2, false), 3, "combo adds on top of the base")
-	check_eq(CompetitiveGame.attack_lines(none, 4, 0, true), 5, "back-to-back adds one to a tetris")
+	check_eq(CompetitiveGame.attack_lines(none, 4, 0, true), 5, "back-to-back adds one to a blanks clear")
 	check_eq(CompetitiveGame.attack_lines(none, 2, 1, true), 3, "combo and back-to-back stack")
 
 
 # ----------------------------------------------------------------- garbage
 
-func test_tetris_queues_garbage_for_every_opponent() -> void:
+func test_blanks_queues_garbage_for_every_opponent() -> void:
 	var game := _new_versus(3, true)
 	_fill_rows_except(game, 0, 18, 21, 9)
 	_drop_vertical_i(game, 0)
@@ -164,7 +164,7 @@ func test_single_sends_nothing_and_doubles_send_one() -> void:
 
 func test_attack_cancels_senders_incoming_queue_first() -> void:
 	var game := _new_versus(2, true)
-	# The sender already owes 3 incoming lines; a tetris (4) cancels those
+	# The sender already owes 3 incoming lines; a blanks clear (4) cancels those
 	# first and only 1 line reaches the opponent.
 	game.players[0].pending_garbage = 3
 	_fill_rows_except(game, 0, 18, 21, 9)

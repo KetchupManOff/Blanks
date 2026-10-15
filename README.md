@@ -1,9 +1,11 @@
 # ☕ **Support my work on Ko-fi**: 
 ## https://ko-fi.com/yankdufn 
 
-# Tetris Yank Edition
+# BLANKS
 
-Tetris Yank Edition is a feature-rich, moddable Tetris-style game built with
+> Blocks + Yank. Clear a line. Create a blank.
+
+BLANKS is a feature-rich, moddable line-clearing block game built with
 [Godot 4.7](https://godotengine.org/). It combines classic tetromino
 gameplay with local multiplayer, host-authoritative online play, customizable
 themes, open-file music and sound effects, and a deliberately testable core.
@@ -115,9 +117,9 @@ that launches against a supplied `ws://` relay URL. Use a TLS-terminated
 Exported builds intentionally keep user-editable content as plain files:
 
 ```text
-TetrisYankEdition/
-├─ TetrisYankEdition.exe
-├─ TetrisYankEdition.pck
+BLANKS/
+├─ BLANKS.exe
+├─ BLANKS.pck
 ├─ music/
 ├─ sfx/
 ├─ themes/
@@ -171,6 +173,6 @@ deployed service. Run the relay suite separately with `cd relay && npm test`.
 
 ## Project status
 
-Tetris Yank Edition is an actively developed Godot project. Exported builds,
+BLANKS is an actively developed Godot project. Exported builds,
 relay deployments, and online development packages may require configuration
 specific to the environment in which they are run.

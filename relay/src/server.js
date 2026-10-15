@@ -38,11 +38,11 @@ const config = {
 
 const relay = createRelayServer(config);
 relay.httpServer.listen(config.port, config.host, () => {
-	console.log(`tye-relay listening on ${config.host}:${config.port}`);
+	console.log(`blanks-relay listening on ${config.host}:${config.port}`);
 });
 
 function shutdown() {
-	console.log('tye-relay shutting down');
+	console.log('blanks-relay shutting down');
 	relay.close(() => process.exit(0));
 	// Force-exit if some socket lingers past graceful close.
 	setTimeout(() => process.exit(0), 2000).unref();
