@@ -1,3 +1,6 @@
+# ☕ **Support my work on Ko-fi**: 
+## https://ko-fi.com/yankdufn 
+
 # Tetris Yank Edition
 
 Tetris Yank Edition is a feature-rich, moddable Tetris-style game built with
@@ -43,8 +46,6 @@ Everything stays open source. No pressure, no paywalls. Just free tools, creativ
 
 Every contribution is appreciated, no matter the amount. And if you can't contribute financially, using my projects, sharing them, reporting bugs, or contributing to the code already means a lot to me.
 
-# ☕ **Support my work on Ko-fi**: 
-# https://ko-fi.com/yankdufn 
 
 
 ## Play a packaged build
