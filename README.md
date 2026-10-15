@@ -26,7 +26,7 @@ themes, open-file music and sound effects, and a deliberately testable core.
 
 ## Getting started
 
-Support My Open-Source Projects ☕
+### Support My Open-Source Projects ☕
 
 I build and maintain open-source projects because I love creating useful tools and sharing them with everyone.
 
@@ -46,7 +46,7 @@ Every contribution is appreciated, no matter the amount. And if you can't contri
 ☕ Support my work on Ko-fi: https://ko-fi.com/yankdufn
 
 
-### Play a packaged build
+## Play a packaged build
 
 Windows x64 packages can be created with the repository's export script:
 
