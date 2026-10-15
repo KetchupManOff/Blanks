@@ -108,6 +108,10 @@ class StubHost:
 			"hold":
 				coop.hold(slot)
 
+	func online_release_player(slot: int) -> void:
+		if coop != null and slot >= 0 and slot < coop.player_count:
+			coop.set_soft_drop(slot, false)
+
 	func online_apply_snapshot(snapshot) -> void:
 		if snapshot is Dictionary and coop != null and coop.apply_snapshot(snapshot):
 			snapshots_applied += 1
@@ -389,6 +393,12 @@ func test_full_session_flow() -> void:
 		check_eq(int(_host_stub.intents[-1]["slot"]), 1, "second-round input keeps client board ownership")
 
 	# --- client leave: host roster shrinks, match continues ---
+	_client_svc.submit_intent(1, "soft_drop", 1)
+	check_true(
+		_pump_until(func() -> bool: return _host_stub.coop.players[1].soft_drop),
+		"host applies the departing client's held soft drop"
+	)
+	check_true(_host_stub.coop.players[1].soft_drop, "remote soft drop is active before disconnect")
 	_client_svc.leave_session()
 	check_true(
 		_pump_until(func() -> bool: return _host_svc.roster.size() == 1),
@@ -397,6 +407,7 @@ func test_full_session_flow() -> void:
 	check_eq(_client_svc.state, ServiceScript.State.READY, "client back at READY after leave")
 	check_eq(_client_stub.leaves, 1, "client host hook observed the leave")
 	check_eq(_host_svc.state, ServiceScript.State.IN_MATCH, "host match continues after the leave")
+	check_false(_host_stub.coop.players[1].soft_drop, "disconnect clears the abandoned slot's held soft drop")
 
 
 func test_competitive_versus_round_flow() -> void:
@@ -468,6 +479,36 @@ func test_competitive_versus_round_flow() -> void:
 	)
 	if _client_stub.results.size() == 1:
 		check_eq(String(_client_stub.results[0]["title"]), "PLAYER 1 WINS!", "versus title preserved")
+
+
+func test_tower_disconnect_releases_remote_soft_drop() -> void:
+	## A disconnected client cannot send its release edge. The host must
+	## neutralize persistent input state or the abandoned Tower piece keeps
+	## falling at soft-drop speed for the rest of the round.
+	_reset_session()
+
+	check_true(_host_svc.ensure_ready(), "host READY")
+	check_true(_client_svc.ensure_ready(), "client READY")
+	check_true(_host_svc.create_lobby(), "room created")
+	_host_svc.set_mode(ModeRules.Mode.TOWER)
+	_client_svc.join_lobby(_host_svc.session_code())
+	check_true(_pump_until(func() -> bool: return _in_lobby(_client_svc)), "client joined")
+	_client_svc.set_ready(true)
+	check_true(_pump_until(_client_ready), "client ready")
+	check_true(_host_svc.start_round(), "Tower round starts")
+	check_true(_pump_until(func() -> bool: return _in_match(_client_svc)), "client enters Tower match")
+
+	_client_svc.submit_intent(1, "soft_drop", 1)
+	check_true(
+		_pump_until(func() -> bool: return _host_stub.coop.players[1].soft_drop),
+		"host applies remote Tower soft drop"
+	)
+	_client_svc.leave_session()
+	check_true(
+		_pump_until(func() -> bool: return _host_svc.roster.size() == 1),
+		"host observes the Tower client departure"
+	)
+	check_false(_host_stub.coop.players[1].soft_drop, "departed Tower slot returns to normal gravity")
 
 
 func test_client_rejects_malformed_competitive_config() -> void:

@@ -694,13 +694,21 @@ func _on_relay_peer_left(peer_id: int) -> void:
 	if _shutting_down or not is_host:
 		return
 	# Host: drop the roster entry and rebroadcast; the match continues
-	# with the remaining players (the abandoned slot simply stops
-	# moving).
+	# with the remaining players. Clear stateful held actions before
+	# removing ownership: the release intent can never arrive after an
+	# abrupt disconnect, and leaving soft drop latched would keep that
+	# abandoned piece falling at 20x speed.
+	var departed_slot: int = -1
 	var kept: Array = []
 	for entry in roster:
-		if int(entry["peer_id"]) != peer_id:
+		if int(entry["peer_id"]) == peer_id:
+			departed_slot = int(entry.get("slot", -1))
+		else:
 			kept.append(entry)
 	if kept.size() != roster.size():
+		if state == State.IN_MATCH and departed_slot >= 0 and game_host != null and game_host.has_method("online_release_player"):
+			print_verbose("online: peer %d left slot %d; clearing held input" % [peer_id, departed_slot])
+			game_host.online_release_player(departed_slot)
 		roster = kept
 		_intent_guards.erase(peer_id)
 		_broadcast_lobby_state()

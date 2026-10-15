@@ -2728,6 +2728,23 @@ func online_apply_intent(slot: int, action: String, arg: int) -> void:
 				_audio.play_sfx("hold")
 
 
+func online_release_player(slot: int) -> void:
+	## Host hook for an abrupt remote departure. Edge actions need no
+	## cleanup, but soft drop is persistent simulation state whose release
+	## intent cannot arrive after the transport has gone away.
+	if online_role != OnlineRole.HOST or slot < 0:
+		return
+	if competitive != null and slot < competitive.player_count:
+		competitive.set_soft_drop(slot, false)
+		if slot < _competitive_soft_drop_active.size():
+			_competitive_soft_drop_active[slot] = false
+		return
+	if coop != null and slot < coop.player_count:
+		coop.set_soft_drop(slot, false)
+		if slot < _coop_soft_drop_active.size():
+			_coop_soft_drop_active[slot] = false
+
+
 func online_apply_snapshot(snapshot) -> void:
 	## Service hook (client): replace the twin simulation's state with the
 	## host's snapshot. Snapshots older than the newest applied tick cannot

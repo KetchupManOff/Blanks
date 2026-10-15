@@ -26,6 +26,19 @@ themes, open-file music and sound effects, and a deliberately testable core.
 
 ## Getting started
 
+Support My Open-Source Projects ☕
+
+I build and maintain open-source projects because I love creating useful tools and sharing them with everyone.
+AI helps me prototype, code, debug, and experiment faster but API usage and subscriptions can get expensive.
+I've always loved modding, customization, and the freedom to adapt software to people's needs and preferences. I believe tools should work for you, not the other way around. That's why I enjoy building projects that are flexible, customizable, and open to experimentation.
+A big part of my motivation comes from looking back at when I was first discovering the world of technology. I love creating the kinds of tools I wish I could have had back then : useful projects that anyone can access, explore, modify, and make their own, without having to pay for them.
+If one of my projects has been useful to you, or if you simply enjoy what I create, consider leaving a tip on Ko-fi. Your support helps cover AI costs, infrastructure, and future development, allowing me to keep experimenting and sharing more projects with the community.
+Everything stays open source. No pressure, no paywalls. Just free tools, creative freedom, and community support.
+Every contribution is appreciated, no matter the amount. And if you can't contribute financially, using my projects, sharing them, reporting bugs, or contributing to the code already means a lot to me.
+
+☕ Support my work on Ko-fi: https://ko-fi.com/yankdufn
+
+
 ### Play a packaged build
 
 Windows x64 packages can be created with the repository's export script:
