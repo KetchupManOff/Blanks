@@ -211,6 +211,24 @@ func test_locked_height_metric() -> void:
 	check_eq(b.locked_height(), 16, "clearing the bottom row lowers the height")
 
 
+func test_revision_invalidates_cached_queries_and_round_trips() -> void:
+	var b := Board.new()
+	check_eq(b.revision, 0, "fresh board starts at revision zero")
+	check_eq(b.locked_height(), 0, "empty height is cached")
+	b.set_cell(4, 21, TetrominoData.Kind.T)
+	check_eq(b.revision, 1, "cell mutation advances the revision")
+	check_eq(b.locked_height(), 1, "height cache follows the mutation")
+	var state: Dictionary = b.snapshot_state()
+	check_eq(int(state["rev"]), b.revision, "snapshot carries the board revision")
+	var twin := Board.new()
+	check_true(twin.restore_state(state), "revisioned snapshot restores")
+	check_eq(twin.revision, b.revision, "authoritative revision restored")
+	check_eq(twin.locked_height(), 1, "restored board recomputes cached height")
+	var cells_before := twin.snapshot_cells()
+	check_true(twin.restore_state(state), "identical revision is accepted idempotently")
+	check_eq(twin.snapshot_cells(), cells_before, "identical snapshot keeps board content")
+
+
 func test_dynamic_snapshot_round_trip() -> void:
 	var b := Board.new()
 	b.set_cell(4, 21, TetrominoData.Kind.T)

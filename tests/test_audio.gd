@@ -358,9 +358,11 @@ func test_scan_builtin_dir_is_safe() -> void:
 		check_false(id.ends_with(".md"), "documentation never becomes a track")
 		check(manager.track_title(id) != "", "built-in track has a title: " + id)
 	# Repo assets must load; user-dropped files that fail are skipped and
-	# reported, never phantom tracks.
-	check(manager.track_ids().has("res://audio/music/placeholder_loop.wav"), "shipped placeholder loop is in the library")
-	check_false(manager.skipped_files().has("res://audio/music/placeholder_loop.wav"), "shipped placeholder loop loads")
+	# reported, never phantom tracks. No audio ships in the repository, so
+	# the placeholder checks only run when a local copy exists.
+	if FileAccess.file_exists("res://audio/music/placeholder_loop.wav"):
+		check(manager.track_ids().has("res://audio/music/placeholder_loop.wav"), "shipped placeholder loop is in the library")
+		check_false(manager.skipped_files().has("res://audio/music/placeholder_loop.wav"), "shipped placeholder loop loads")
 
 
 func test_rescan_picks_up_new_files() -> void:

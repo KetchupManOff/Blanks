@@ -11,6 +11,12 @@ relay/.env
 eos_credentials.cfg
 user_credentials.cfg
 
+# Built-in music is local-only: players drop their own legally supplied
+# tracks into audio/music/ (see audio/music/README.md); only that guide
+# ships in the repository.
+audio/music/*
+!audio/music/README.md
+
 # Exports
 Exports/
 

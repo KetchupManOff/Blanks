@@ -17,7 +17,12 @@ const VISIBLE_ROWS: int = 20
 
 var WIDTH: int = DEFAULT_WIDTH
 var HEIGHT: int = DEFAULT_HEIGHT
+## Content/geometry identity used by presentation and authoritative snapshot
+## consumers to avoid rebuilding unchanged board data every frame.
+var revision: int = 0
 var _cells := PackedInt32Array()
+var _locked_height_revision: int = -1
+var _locked_height_cache: int = 0
 
 
 func _init(width: int = DEFAULT_WIDTH) -> void:
@@ -45,7 +50,10 @@ func get_cell(x: int, y: int) -> int:
 
 func set_cell(x: int, y: int, value: int) -> void:
 	assert(is_inside(x, y), "set_cell outside board: %d,%d" % [x, y])
+	if _cells[index(x, y)] == value:
+		return
 	_cells[index(x, y)] = value
+	revision += 1
 
 
 func is_blocked(x: int, y: int) -> bool:
@@ -129,6 +137,7 @@ func clear_rows(rows: Array) -> void:
 		write_row -= 1
 		y -= 1
 	_cells = out
+	revision += 1
 
 
 func is_completely_empty() -> bool:
@@ -162,6 +171,7 @@ func prepend_rows(count: int) -> void:
 			out[dst_start + x] = _cells[src_start + x]
 	_cells = out
 	HEIGHT += count
+	revision += 1
 
 
 func insert_garbage_rows(count: int, hole_columns: Array, garbage_value: int) -> void:
@@ -189,6 +199,7 @@ func insert_garbage_rows(count: int, hole_columns: Array, garbage_value: int) ->
 		for x in WIDTH:
 			out[y * WIDTH + x] = garbage_value if x != hole else TetrominoData.EMPTY
 	_cells = out
+	revision += 1
 
 
 func locked_height() -> int:
@@ -196,12 +207,18 @@ func locked_height() -> int:
 	## locked block: zero for an empty board, one for a stack touching only
 	## the bottom row. Invariant under prepend_rows (the stack and the
 	## floor translate together), which is why Tower scoring uses it.
+	if _locked_height_revision == revision:
+		return _locked_height_cache
 	for y in HEIGHT:
 		var row_start: int = y * WIDTH
 		for x in WIDTH:
 			if _cells[row_start + x] != TetrominoData.EMPTY:
-				return HEIGHT - y
-	return 0
+				_locked_height_cache = HEIGHT - y
+				_locked_height_revision = revision
+				return _locked_height_cache
+	_locked_height_cache = 0
+	_locked_height_revision = revision
+	return _locked_height_cache
 
 
 # --------------------------------------------------------------- snapshots
@@ -219,12 +236,13 @@ func restore_cells(cells: PackedInt32Array) -> bool:
 	if cells.size() != WIDTH * HEIGHT:
 		return false
 	_cells = cells.duplicate()
+	revision += 1
 	return true
 
 
 func snapshot_state() -> Dictionary:
 	## Geometry-aware capture: the runtime height travels with the cells.
-	return {"h": HEIGHT, "cells": _cells.duplicate()}
+	return {"h": HEIGHT, "rev": revision, "cells": _cells.duplicate()}
 
 
 func restore_state(state) -> bool:
@@ -233,13 +251,18 @@ func restore_state(state) -> bool:
 	if not (state is Dictionary):
 		return false
 	var h: int = int((state as Dictionary).get("h", -1))
+	var incoming_revision: int = int((state as Dictionary).get("rev", -1))
 	var raw = (state as Dictionary).get("cells", null)
 	if h < DEFAULT_HEIGHT or not (raw is PackedInt32Array):
 		return false
 	if (raw as PackedInt32Array).size() != WIDTH * h:
 		return false
+	if incoming_revision >= 0 and incoming_revision == revision and h == HEIGHT:
+		return true
 	HEIGHT = h
 	_cells = (raw as PackedInt32Array).duplicate()
+	revision = incoming_revision if incoming_revision >= 0 else revision + 1
+	_locked_height_revision = -1
 	return true
 
 

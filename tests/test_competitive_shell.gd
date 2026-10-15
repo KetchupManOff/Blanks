@@ -307,6 +307,27 @@ func test_tower_growth_relayouts_presenters() -> void:
 	var heights: Array[int] = _host._competitive_layout_heights.duplicate()
 	check_eq(heights, [22], "layout starts at the default height")
 	var size_before: Vector2 = _host._competitive_presenters[0].board_size()
+	var renderer = _host._competitive_presenters[0].installed_board()
+	var board = _host.competitive.players[0].board
+	renderer.sync_view(_host.competitive, size_before.x / 10.0)
+	renderer._static_board_revision = board.revision
+	renderer._static_height = board.HEIGHT
+	renderer._static_cell = size_before.x / 10.0
+	renderer.sync_view(_host.competitive, renderer._static_cell)
+	check_eq(renderer._static_board_revision, board.revision, "unchanged board keeps its static layer")
+	var clearing: Array[int] = [21]
+	_host.competitive.players[0].clearing_rows = clearing
+	renderer.sync_view(_host.competitive, renderer._static_cell)
+	check_eq(renderer._static_board_revision, -1, "line-clear state invalidates locked cells")
+	var no_clearing: Array[int] = []
+	_host.competitive.players[0].clearing_rows = no_clearing
+	renderer._static_board_revision = board.revision
+	renderer._static_height = board.HEIGHT
+	renderer._static_cell = size_before.x / 10.0
+	renderer._static_clearing_rows = no_clearing
+	_host.competitive.debug_set_cell(0, 0, 21, TetrominoData.Kind.I)
+	renderer.sync_view(_host.competitive, renderer._static_cell)
+	check_eq(renderer._static_board_revision, -1, "board mutation invalidates the static layer")
 	# Force ceiling growth: a full stack under a grounded spawn piece.
 	for x in 10:
 		for y in range(2, 22):

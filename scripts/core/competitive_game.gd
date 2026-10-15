@@ -84,6 +84,13 @@ class PlayerState:
 	var eliminated: bool = false
 	var eliminated_at_tick: int = -1
 	var pending_garbage: int = 0
+	var ghost_cache_board_revision: int = -1
+	var ghost_cache_phase: int = -1
+	var ghost_cache_kind: int = -1
+	var ghost_cache_state: int = -1
+	var ghost_cache_x: int = 0
+	var ghost_cache_y: int = 0
+	var ghost_cache_result: int = 0
 
 	func _init(player_index: int) -> void:
 		index = player_index
@@ -260,9 +267,25 @@ func current_cells(player: int) -> Array:
 
 func ghost_y(player: int) -> int:
 	var p: PlayerState = players[player]
+	if (
+		p.ghost_cache_board_revision == p.board.revision
+		and p.ghost_cache_phase == phase
+		and p.ghost_cache_kind == p.piece_kind
+		and p.ghost_cache_state == p.piece_state
+		and p.ghost_cache_x == p.piece_x
+		and p.ghost_cache_y == p.piece_y
+	):
+		return p.ghost_cache_result
 	var y: int = p.piece_y
 	while _can_move_to(p, p.piece_x, y + 1):
 		y += 1
+	p.ghost_cache_board_revision = p.board.revision
+	p.ghost_cache_phase = phase
+	p.ghost_cache_kind = p.piece_kind
+	p.ghost_cache_state = p.piece_state
+	p.ghost_cache_x = p.piece_x
+	p.ghost_cache_y = p.piece_y
+	p.ghost_cache_result = y
 	return y
 
 

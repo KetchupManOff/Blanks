@@ -370,6 +370,24 @@ func test_tower_height_is_locked_cells_only() -> void:
 	check_eq(active_height, 2, "active piece excluded from height")
 
 
+func test_tower_ghost_cache_invalidates_on_piece_and_board_changes() -> void:
+	var game := _new_tower(1)
+	game.debug_spawn_piece(0, TetrominoData.Kind.O, 4, 0)
+	var first_y: int = game.ghost_y(0)
+	var player = game.players[0]
+	check_eq(player.ghost_cache_result, first_y, "first query caches the landing row")
+	check_eq(player.ghost_cache_board_revision, player.board.revision, "cache records board revision")
+	check_eq(game.ghost_y(0), first_y, "unchanged query reuses the landing row")
+	check_true(game.try_move(0, -1), "piece moves before cache invalidation check")
+	game.ghost_y(0)
+	check_eq(player.ghost_cache_x, player.piece_x, "piece movement refreshes the cache key")
+	for x in 10:
+		game.debug_set_cell(0, x, 15, TetrominoData.Kind.I)
+	var blocked_y: int = game.ghost_y(0)
+	check_true(blocked_y < first_y, "board mutation recomputes a nearer landing row")
+	check_eq(player.ghost_cache_board_revision, player.board.revision, "refreshed cache follows board revision")
+
+
 func test_tower_expands_before_ceiling_loss() -> void:
 	var game := _new_tower(1)
 	_fill_rows_except(game, 0, 2, 21, -1)

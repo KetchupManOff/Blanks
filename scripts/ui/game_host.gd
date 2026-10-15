@@ -1729,10 +1729,13 @@ func _sync_competitive_display() -> void:
 		_layout_competitive()
 
 	for i in competitive.player_count:
-		var renderer: Node2D = _competitive_presenters[i].installed_board()
-		renderer.session = competitive
-		renderer.cell = _competitive_presenters[i].board_size().x / float(BoardClass.DEFAULT_WIDTH)
-		renderer.queue_redraw()
+		var renderer: CompetitiveBoardRenderer = (
+			_competitive_presenters[i].installed_board() as CompetitiveBoardRenderer
+		)
+		renderer.sync_view(
+			competitive,
+			_competitive_presenters[i].board_size().x / float(BoardClass.DEFAULT_WIDTH),
+		)
 		_competitive_holds[i].set_piece(competitive.players[i].hold_kind, competitive.players[i].hold_used)
 		var previews: Array[int] = competitive.preview_kinds(i)
 		for j in _competitive_previews[i].size():
