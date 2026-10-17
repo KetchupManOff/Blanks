@@ -153,20 +153,47 @@ machine without Godot installed.
       menu even when the gameplay music mode is Off.
 - [ ] A menu music track that later disappears (rescan) falls back to
       "Follow Game Music" and re-saves settings without breaking anything.
-- [ ] Music mode cycles Off / Single / Playlist / Shuffle and persists.
-- [ ] Single loops the selected track; Playlist follows the persisted
-      order and wraps; Shuffle never repeats the current track back to
-      back (with two or more tracks).
+- [ ] Music mode cycles Off / Single / Playlist / Shuffle and persists;
+      Audio-category Shuffle always draws from the whole library, and
+      selecting it resets any playlist-scoped shuffle, while Playlist
+      plays the active named playlist.
+- [ ] Single loops the selected track; Playlist follows the stored order
+      from its first entry and wraps; Shuffle never repeats the current
+      track back to back (with two or more tracks).
 - [ ] The track selector lists built-in tracks first (friendly labels)
       and custom files from `user://music/` by filename; only `.ogg`,
       `.mp3`, and `.wav` files appear.
 - [ ] "Rescan Music Library" picks up files added while the game runs and
-      reports skipped unreadable files in the status line.
+      reports skipped unreadable files in the status line; rescans keep
+      every named playlist's remaining entries (ids preserved in order)
+      while dropping only what vanished.
 - [ ] Preview plays the selected track; closing settings restores the
       previously configured playback exactly.
-- [ ] The playlist editor adds/removes library tracks, reorders with
-      Left/Right, and persists the order; the list stays navigable with a
-      large library (windowed rendering).
+- [ ] The Playlist Manager (Settings > Audio) creates, renames, edits,
+      plays, and deletes named playlists: creation opens rename (cancel
+      keeps the generated "New Playlist" name), Enter opens a playlist's
+      editor (add/remove library tracks, reorder with Left/Right),
+      Left/Right on a catalog playlist plays it in order, and Enter on a
+      library song plays it immediately as Single. Empty playlists stay
+      valid editing targets whose playback actions explain themselves;
+      deleting always asks for confirmation first, and deleting the
+      active playlist falls playback back to Single with a valid track
+      and the library shuffle source.
+- [ ] Deleting the active playlist (or emptying it) repairs playback to
+      Single through the same save path, and the manager lists stay
+      navigable with a large library (windowed rendering).
+- [ ] Old settings migrate cleanly: the single legacy playlist becomes
+      an active "My Playlist" with its ordered entries (empty ones start
+      with no playlists) and is never re-serialized in the old shape.
+- [ ] The Audio category and the Playlist Manager show the current song,
+      its playback mode, and the active playlist when one drives
+      playback, and both refresh after a skip.
+- [ ] F1 skips the current track everywhere (menu, gameplay, pause,
+      settings, results) except while typing a name or capturing a
+      binding: it restarts Single, advances Playlist in order and
+      Shuffle (library- or playlist-scoped), restarts the menu track in
+      the menu, keeps paused playback paused, and does nothing when
+      music is Off or nothing can play.
 - [ ] Selecting a track that later disappears falls back to the first
       valid track and re-saves settings; an empty library never breaks
       startup or the settings screen.

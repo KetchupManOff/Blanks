@@ -609,6 +609,61 @@ func test_osk_rename_flow() -> void:
 	check_eq(_host.settings.profile_name(id), "Ace", "rename committed through the host")
 
 
+func test_osk_playlist_rename_context() -> void:
+	# Playlist name entry uses the same keyboard with its own validation:
+	# profile names are a separate namespace and the cap is 24 characters.
+	_to_menu()
+	var playlist_id: String = _host.settings.create_playlist("Shell Mix")
+	check_true(_host.playlist_name_taken("Shell Mix"), "playlist created")
+	_host.cmd_open_playlist_rename(playlist_id)
+	check_true(_osk().is_open(), "playlist rename opens the shared keyboard")
+	check_eq(_osk()._text, "Shell Mix", "playlist rename starts with the current name")
+	while not _osk()._text.is_empty():
+		_osk()._delete_char()
+	for letter in "Player 1":
+		_osk()._type_char(letter)
+	_osk()._confirm()
+	check_false(_osk().is_open(), "a taken profile name is fine for a playlist")
+	check_eq(_host.playlist_name(playlist_id), "Player 1", "playlist renamed through the OSK")
+	# A duplicate playlist name is still rejected in this context.
+	_host.settings.create_playlist("Other")
+	_host.cmd_open_playlist_rename(playlist_id)
+	while not _osk()._text.is_empty():
+		_osk()._delete_char()
+	for letter in "other":
+		_osk()._type_char(letter)
+	_osk()._confirm()
+	check_true(_osk().is_open(), "duplicate playlist name rejected")
+	check_true(_osk()._status.text.contains("already"), "duplicate reported in the keyboard")
+	# Playlist names cap at 24 characters (profiles at 16).
+	while not _osk()._text.is_empty():
+		_osk()._delete_char()
+	for letter in "TwentyFourCharacters!OK!!!Extra":
+		_osk()._type_char(letter)
+	check_eq(_osk()._text.length(), 24, "playlist entry caps at 24 characters")
+	check_true(_osk()._status.text.contains("too long"), "overlong input reports an error")
+	_osk()._cancel()
+	check_eq(_host.playlist_name(playlist_id), "Player 1", "cancel keeps the last committed name")
+
+
+func test_f1_is_inert_behind_the_osk() -> void:
+	# The global F1 skip never fires while the on-screen keyboard owns
+	# input: the OSK consumes the key as inert typing and the host guard
+	# double-checks the open overlay.
+	_to_menu()
+	_host.cmd_open_name_create(-1)
+	var f1 := InputEventKey.new()
+	f1.physical_keycode = KEY_F1
+	f1.pressed = true
+	_osk()._unhandled_input(f1)
+	check_true(_osk().is_open(), "F1 neither commits nor cancels the keyboard")
+	check_eq(_osk()._text, "", "F1 types nothing into the keyboard")
+	_host._unhandled_input(f1)
+	check_true(_osk().is_open(), "the host refuses to skip behind the open keyboard")
+	_osk()._cancel()
+	check_false(_osk().is_open(), "keyboard still closes normally")
+
+
 # ------------------------------------------------- guided controller rebinding
 
 func _claim() -> Node:

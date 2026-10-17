@@ -16,6 +16,9 @@ const ModeRules = preload("res://scripts/core/mode_rules.gd")
 enum ScreenMode { CLOSED, ENTRY, CODE, LOBBY }
 
 const MAX_ROSTER_ROWS: int = 4
+const ROW_CORNER_RADIUS: int = 8
+const ROW_PAD_X: float = 18.0
+const ROW_PAD_Y: float = 6.0
 
 var _host: Node = null
 var _service: Node = null
@@ -34,6 +37,8 @@ var _code_edit: LineEdit = null
 var _mode: int = ScreenMode.CLOSED
 var _items: Array = []  # {"label": String, "callback": Callable}
 var _labels: Array[Label] = []
+var _rows: Array[PanelContainer] = []
+var _row_styles: Array[StyleBoxFlat] = []
 var _selected: int = 0
 var _last_service_state: int = -1
 # Item-structure key (mode, role, garbage): rebuilding on every roster
@@ -92,18 +97,21 @@ func _build() -> void:
 	_title.add_theme_font_size_override("font_size", _tokens["menu.title_size"])
 	_title.add_theme_color_override("font_color", _tokens["theme.text"])
 	_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_apply_font_override(_title, _title_font)
 	box.add_child(_title)
 
 	_status = Label.new()
-	_status.add_theme_font_size_override("font_size", 18)
+	_status.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 	_status.add_theme_color_override("font_color", _tokens["theme.dim"])
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_apply_font_override(_status, _font)
 	box.add_child(_status)
 
 	_detail = Label.new()
 	_detail.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 	_detail.add_theme_color_override("font_color", _tokens["theme.dim"])
 	_detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_apply_font_override(_detail, _font)
 	box.add_child(_detail)
 
 	_roster_box = VBoxContainer.new()
@@ -112,11 +120,12 @@ func _build() -> void:
 	box.add_child(_roster_box)
 	for i in MAX_ROSTER_ROWS:
 		var row := Label.new()
-		row.add_theme_font_size_override("font_size", 18)
+		row.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 		row.add_theme_color_override("font_color", _tokens["theme.dim"])
 		row.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.visible = false
+		_apply_font_override(row, _font)
 		_roster_box.add_child(row)
 		_roster_labels.append(row)
 
@@ -135,6 +144,7 @@ func _build() -> void:
 	box.add_child(_code_edit)
 
 	_style_panel()
+	_style_code_edit()
 
 
 func _style_panel() -> void:
@@ -152,6 +162,34 @@ func _style_panel() -> void:
 	_panel.add_theme_stylebox_override("panel", style)
 
 
+func _style_code_edit() -> void:
+	if _code_edit == null:
+		return
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = _tokens["menu.panel"]
+	normal.border_color = _tokens["menu.divider"]
+	normal.set_border_width_all(1)
+	normal.set_corner_radius_all(ROW_CORNER_RADIUS)
+	normal.content_margin_left = ROW_PAD_X
+	normal.content_margin_right = ROW_PAD_X
+	normal.content_margin_top = ROW_PAD_Y
+	normal.content_margin_bottom = ROW_PAD_Y
+	var focus: StyleBoxFlat = normal.duplicate()
+	focus.border_color = _tokens["menu.focus"]
+	focus.set_border_width_all(2)
+	_code_edit.add_theme_stylebox_override("normal", normal)
+	_code_edit.add_theme_stylebox_override("focus", focus)
+	_code_edit.add_theme_stylebox_override("read_only", normal.duplicate())
+	_code_edit.add_theme_color_override("font_color", _tokens["theme.text"])
+	_code_edit.add_theme_color_override("font_placeholder_color", _tokens["theme.dim"])
+	_code_edit.add_theme_color_override("caret_color", _tokens["menu.focus"])
+	var selection: Color = _tokens["theme.accent"]
+	selection.a = 0.35
+	_code_edit.add_theme_color_override("selection_color", selection)
+	_code_edit.add_theme_font_size_override("font_size", _tokens["menu.item_size"])
+	_apply_font_override(_code_edit, _font)
+
+
 func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 	_tokens = tokens
 	_font = media.get("font")
@@ -159,13 +197,30 @@ func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 	if _root == null:
 		return
 	_bg.color = _tokens["menu.scrim"]
+	_title.add_theme_font_size_override("font_size", _tokens["menu.title_size"])
 	_title.add_theme_color_override("font_color", _tokens["theme.text"])
+	_status.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 	_status.add_theme_color_override("font_color", _tokens["theme.dim"])
+	_detail.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 	_detail.add_theme_color_override("font_color", _tokens["theme.dim"])
+	_apply_font_override(_title, _title_font)
+	_apply_font_override(_status, _font)
+	_apply_font_override(_detail, _font)
 	for label in _roster_labels:
+		label.add_theme_font_size_override("font_size", _tokens["menu.detail_size"])
 		label.add_theme_color_override("font_color", _tokens["theme.dim"])
+		_apply_font_override(label, _font)
+	_items_box.add_theme_constant_override("separation", _tokens["menu.spacing"])
 	_style_panel()
+	_style_code_edit()
 	_rebuild_items()
+
+
+static func _apply_font_override(control: Control, font: Font) -> void:
+	if font == null:
+		control.remove_theme_font_override("font")
+	else:
+		control.add_theme_font_override("font", font)
 
 
 # ------------------------------------------------------------------- screens
@@ -217,6 +272,8 @@ func close() -> void:
 	_mode = ScreenMode.CLOSED
 	_items = []
 	_labels = []
+	_rows = []
+	_row_styles = []
 	_nav.reset()
 
 
@@ -293,16 +350,32 @@ func _rebuild_items() -> void:
 	if _items_box == null:
 		return
 	for child in _items_box.get_children():
+		_items_box.remove_child(child)
 		child.queue_free()
 	_labels = []
+	_rows = []
+	_row_styles = []
 	for item in _items:
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0.0, 0.0, 0.0, 0.0)
+		style.set_corner_radius_all(ROW_CORNER_RADIUS)
+		style.content_margin_left = ROW_PAD_X
+		style.content_margin_right = ROW_PAD_X
+		style.content_margin_top = ROW_PAD_Y
+		style.content_margin_bottom = ROW_PAD_Y
+		var row := PanelContainer.new()
+		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_theme_stylebox_override("panel", style)
 		var label := Label.new()
 		label.add_theme_font_size_override("font_size", _tokens["menu.item_size"])
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		if _font != null:
-			label.add_theme_font_override("font", _font)
-		_items_box.add_child(label)
+		_apply_font_override(label, _font)
+		row.add_child(label)
+		_items_box.add_child(row)
+		_rows.append(row)
+		_row_styles.append(style)
 		_labels.append(label)
 	_refresh_labels()
 
@@ -310,8 +383,17 @@ func _rebuild_items() -> void:
 func _refresh_labels() -> void:
 	for i in _labels.size():
 		var selected: bool = i == _selected
-		_labels[i].text = ("▸  " if selected else "   ") + String(_items[i]["label"])
+		_labels[i].text = String(_items[i]["label"])
 		_labels[i].add_theme_color_override("font_color", _tokens["menu.focus"] if selected else _tokens["theme.dim"])
+	for i in _row_styles.size():
+		var style: StyleBoxFlat = _row_styles[i]
+		if i == _selected:
+			style.bg_color = _tokens["menu.panel"]
+			style.border_color = _tokens["menu.divider"]
+			style.set_border_width_all(1)
+		else:
+			style.bg_color = Color(0.0, 0.0, 0.0, 0.0)
+			style.set_border_width_all(0)
 
 
 func _refresh_roster() -> void:

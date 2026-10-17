@@ -9,6 +9,9 @@ extends Node
 ##   deadzone from that specific device only. Escape or the pad's B button
 ##   cancels; the device identity is preserved for the session.
 ## Pure modifier keys are ignored so bindings like Shift can be captured.
+## F1 is a fixed global shortcut: keyboard capture consumes it but never
+## captures it, so it stays non-rebindable and does not leak to other
+## handlers while a capture is pending.
 
 signal captured(record: Dictionary)
 signal cleared()
@@ -19,6 +22,9 @@ const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const AXIS_DEADZONE := 0.5
 
 const _MODIFIER_KEYS := [KEY_SHIFT, KEY_CTRL, KEY_ALT, KEY_META]
+
+## Fixed global shortcuts that must never become gameplay bindings.
+const RESERVED_KEYS := [KEY_F1]
 
 const MODE_KEYBOARD := "keyboard"
 const MODE_CONTROLLER := "controller"
@@ -70,6 +76,10 @@ func _capture_keyboard(event: InputEvent) -> void:
 		return
 	if k.physical_keycode in _MODIFIER_KEYS:
 		return  # keep waiting for the actual key
+	if k.physical_keycode in RESERVED_KEYS:
+		# Consumed above but never captured: fixed global shortcuts stay
+		# reserved and the capture keeps waiting.
+		return
 	var record := DefaultBindings.record_from_event(k)
 	if record.is_empty():
 		return

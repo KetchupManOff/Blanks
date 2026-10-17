@@ -3,6 +3,13 @@ extends RefCounted
 ## validating, and serializing. Applying display/audio values is the host's
 ## job; this class never touches DisplayServer or AudioServer.
 ##
+## Schema v4 replaces the single anonymous playlist with named playlists:
+## `music_playlists` holds `{id, name, tracks}` records, the active one is
+## `active_music_playlist_id`, and `music_shuffle_source` records whether
+## Shuffle draws from the whole library or the active playlist. The legacy
+## flat `music_playlist` array of v3-and-older files is consumed into one
+## active "My Playlist" record (empty legacy lists start with none) and
+## never re-serialized.
 ## Schema v3 makes keyboard bindings per-profile: every profile record owns
 ## a sanitized `keyboard_bindings` action mapping alongside its controller
 ## mapping, and the top-level shared keyboard profile is gone. The active
@@ -24,17 +31,27 @@ const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const ModeRules = preload("res://scripts/core/mode_rules.gd")
 
 const DEFAULT_PATH := "user://settings.json"
-const SCHEMA_VERSION := 3
+const SCHEMA_VERSION := 4
 const SUPPORTED_WINDOW_SCALES := [1, 2, 3]
 ## Music selection lives under the "audio" section as additive optional
 ## fields: older files without them keep loading with defaults, which is
 ## the migration path for this schema addition.
 const MUSIC_MODES := ["off", "single", "playlist", "shuffle"]
+## Where Shuffle draws its pool from: the whole library (the Audio
+## category's legacy Shuffle) or the active named playlist (the manager's
+## Shuffle Playlist action).
+const MUSIC_SHUFFLE_SOURCES := ["library", "playlist"]
 ## Default selected theme ID (Modern Neon Arcade); resolved against the
 ## discovered theme list by the host's theme manager.
 const DEFAULT_THEME_ID := "builtin:modern_neon"
 ## Profile display names: non-empty, single line, bounded length.
 const MAX_NAME_LENGTH := 16
+## Playlist display names: same rules with their own bound.
+const MAX_PLAYLIST_NAME_LENGTH := 24
+## The v3-and-older flat playlist migrates into a record with this name.
+const LEGACY_PLAYLIST_NAME := "My Playlist"
+## Base name for manager-created playlists (suffixed when taken).
+const NEW_PLAYLIST_BASE_NAME := "New Playlist"
 ## Each profile keeps at most this many results per mode key.
 const MAX_RESULTS_PER_MODE := 5
 ## Each profile keeps at most this many multiplayer competitive match
@@ -62,7 +79,17 @@ var music_track: String = ""
 ## the gameplay music mode/selection; a track ID makes the menu loop that
 ## track regardless of the gameplay music mode (additive field).
 var menu_music_track: String = ""
-var music_playlist: Array = []
+## Named playlists: Array of {id, name, tracks} records. Empty lists are
+## valid editing targets; only structural rules (string ids, no duplicates
+## inside one list) are enforced here - track existence is the audio
+## manager's job.
+var music_playlists: Array = []
+## The playlist the ordered Playlist mode (and a playlist-scoped Shuffle)
+## plays; empty when none is active.
+var active_music_playlist_id: String = ""
+## Which source Shuffle draws from: "library" (default, the Audio
+## category's Shuffle) or "playlist" (the manager's Shuffle Playlist).
+var music_shuffle_source: String = "library"
 ## Keep user-provided tracks at a consistent perceived loudness. Enabled
 ## by default, including for settings files written before this field
 ## existed (absent means default).
@@ -89,7 +116,9 @@ func _reset_to_defaults() -> void:
 	music_mode = "single"
 	music_track = ""
 	menu_music_track = ""
-	music_playlist = []
+	music_playlists = []
+	active_music_playlist_id = ""
+	music_shuffle_source = "library"
 	normalize_custom_music = true
 	profiles = [default_profile_record(DEFAULT_PROFILE_NAME, [])]
 	active_profile_id = profiles[0]["id"]
@@ -111,7 +140,9 @@ func to_dict() -> Dictionary:
 		"music_mode": music_mode,
 		"music_track": music_track,
 		"menu_music_track": menu_music_track,
-		"music_playlist": music_playlist.duplicate(),
+		"music_playlists": _playlists_deep_copy(music_playlists),
+		"active_music_playlist_id": active_music_playlist_id,
+		"music_shuffle_source": music_shuffle_source,
 		"normalize_custom_music": normalize_custom_music,
 	}
 	var out := {
@@ -172,7 +203,7 @@ func _apply_dict(data: Dictionary) -> bool:
 	# coerced from integral floats too.
 	var version := _as_int(data.get("version"), -1)
 	match version:
-		SCHEMA_VERSION:
+		SCHEMA_VERSION, 3:
 			return _apply_v3(data)
 		2:
 			return _apply_v2(data)
@@ -212,14 +243,37 @@ func _apply_audio(data: Dictionary) -> void:
 		var menu_track = audio.get("menu_music_track")
 		if typeof(menu_track) == TYPE_STRING:
 			menu_music_track = menu_track
-		var playlist = audio.get("music_playlist")
-		if typeof(playlist) == TYPE_ARRAY:
-			music_playlist = _sanitize_playlist(playlist)
+		var playlists = audio.get("music_playlists")
+		if playlists is Array:
+			music_playlists = sanitize_playlists(playlists)
+		elif audio.get("music_playlist") is Array:
+			# v3-and-older single playlist: consume it into one named
+			# record (never re-serialized as the flat array). An empty
+			# legacy list simply starts with no playlists.
+			var legacy := _sanitize_playlist(audio.get("music_playlist"))
+			if not legacy.is_empty():
+				var id := fresh_playlist_id([])
+				music_playlists = [{
+					"id": id,
+					"name": sanitize_playlist_name(LEGACY_PLAYLIST_NAME, LEGACY_PLAYLIST_NAME),
+					"tracks": legacy,
+				}]
+				active_music_playlist_id = id
+		var active_id = audio.get("active_music_playlist_id")
+		if typeof(active_id) == TYPE_STRING:
+			var candidate := String(active_id)
+			active_music_playlist_id = candidate if not candidate.is_empty() and not find_playlist(candidate).is_empty() else ""
+		var source = audio.get("music_shuffle_source")
+		if typeof(source) == TYPE_STRING and MUSIC_SHUFFLE_SOURCES.has(source):
+			music_shuffle_source = source
 		var normalize = audio.get("normalize_custom_music")
 		if normalize is bool:
 			normalize_custom_music = normalize
 
 
+## Shared body for v3 and v4 files: the shape is identical, and the audio
+## section loader covers both the named-playlist fields and the v3 legacy
+## playlist conversion.
 func _apply_v3(data: Dictionary) -> bool:
 	_apply_display(data)
 	_apply_audio(data)
@@ -499,6 +553,216 @@ func reset_controller_bindings(profile_id: String) -> bool:
 	return true
 
 
+# ----------------------------------------------------------------- playlists
+# Named music playlists: pure data helpers for the manager. Structural
+# sanitation only (ids, names, in-list duplicates); track existence is the
+# audio manager's job because it knows the scanned library.
+
+func find_playlist(playlist_id: String) -> Dictionary:
+	## The playlist record with this id, or {} when it does not exist.
+	for playlist in music_playlists:
+		if playlist["id"] == playlist_id:
+			return playlist
+	return {}
+
+
+func playlist_name(playlist_id: String) -> String:
+	var playlist := find_playlist(playlist_id)
+	if playlist.is_empty():
+		return ""
+	return playlist["name"]
+
+
+func playlist_tracks(playlist_id: String) -> Array:
+	## Safe copy of one playlist's ordered tracks, or [].
+	var playlist := find_playlist(playlist_id)
+	if playlist.is_empty():
+		return []
+	return (playlist["tracks"] as Array).duplicate()
+
+
+func active_playlist() -> Dictionary:
+	return find_playlist(active_music_playlist_id)
+
+
+func active_playlist_name() -> String:
+	var playlist := active_playlist()
+	return "" if playlist.is_empty() else String(playlist["name"])
+
+
+func active_playlist_tracks() -> Array:
+	## Safe copy of the active playlist's tracks, or [] when none is active.
+	var playlist := active_playlist()
+	if playlist.is_empty():
+		return []
+	return (playlist["tracks"] as Array).duplicate()
+
+
+func playlist_name_taken(name: String, exclude_id: String = "") -> bool:
+	## Case-insensitive duplicate playlist-name check for create/rename.
+	var cleaned := sanitize_playlist_name(name, "")
+	if cleaned.is_empty():
+		return false
+	for playlist in music_playlists:
+		if playlist["id"] == exclude_id:
+			continue
+		if String(playlist["name"]).to_lower() == cleaned.to_lower():
+			return true
+	return false
+
+
+func unique_playlist_name(base: String) -> String:
+	## The base name, or "<base> N" (within the length cap) when taken.
+	var cleaned := sanitize_playlist_name(base, NEW_PLAYLIST_BASE_NAME)
+	if not playlist_name_taken(cleaned):
+		return cleaned
+	var index := 2
+	while true:
+		var suffix := " %d" % index
+		var head := cleaned
+		if head.length() + suffix.length() > MAX_PLAYLIST_NAME_LENGTH:
+			head = cleaned.substr(0, MAX_PLAYLIST_NAME_LENGTH - suffix.length()).strip_edges()
+		var candidate := head + suffix
+		if not playlist_name_taken(candidate):
+			return candidate
+		index += 1
+	return cleaned
+
+
+func create_playlist(name: String) -> String:
+	## Appends a new empty playlist and returns its id; "" when the
+	## sanitized name duplicates an existing playlist (callers validate
+	## first, this guards).
+	var cleaned := sanitize_playlist_name(name, "")
+	if cleaned.is_empty() or playlist_name_taken(cleaned):
+		return ""
+	var ids: Array = []
+	for playlist in music_playlists:
+		ids.append(playlist["id"])
+	var id := fresh_playlist_id(ids)
+	music_playlists.append({"id": id, "name": cleaned, "tracks": []})
+	return id
+
+
+func rename_playlist(playlist_id: String, name: String) -> bool:
+	var playlist := find_playlist(playlist_id)
+	if playlist.is_empty():
+		return false
+	var cleaned := sanitize_playlist_name(name, "")
+	if cleaned.is_empty() or playlist_name_taken(cleaned, playlist_id):
+		return false
+	playlist["name"] = cleaned
+	return true
+
+
+func set_playlist_tracks(playlist_id: String, tracks) -> bool:
+	## Replaces one playlist's whole ordered track array (structurally
+	## sanitized). Returns false when the playlist is missing.
+	var playlist := find_playlist(playlist_id)
+	if playlist.is_empty():
+		return false
+	var raw: Array = tracks if tracks is Array else []
+	playlist["tracks"] = _sanitize_playlist(raw)
+	return true
+
+
+func delete_playlist(playlist_id: String) -> bool:
+	## Removes one playlist; deleting the active playlist also clears the
+	## active pointer. Playback repair is the host's job.
+	for i in music_playlists.size():
+		if music_playlists[i]["id"] == playlist_id:
+			music_playlists.remove_at(i)
+			if active_music_playlist_id == playlist_id:
+				active_music_playlist_id = ""
+			return true
+	return false
+
+
+func set_active_playlist(playlist_id: String) -> bool:
+	if find_playlist(playlist_id).is_empty():
+		return false
+	active_music_playlist_id = playlist_id
+	return true
+
+
+static func sanitize_playlist_name(name, fallback: String) -> String:
+	## Non-empty single-line playlist name, whitespace collapsed, bounded
+	## to the playlist length cap.
+	var text := ""
+	if name is String:
+		text = name
+	elif name is float or name is int:
+		text = str(name)
+	text = text.strip_edges().replace("\n", " ").replace("\t", " ")
+	while text.contains("  "):
+		text = text.replace("  ", " ")
+	if text.length() > MAX_PLAYLIST_NAME_LENGTH:
+		text = text.substr(0, MAX_PLAYLIST_NAME_LENGTH).strip_edges()
+	if text.is_empty():
+		return fallback
+	return text
+
+
+static func fresh_playlist_id(existing_ids: Array) -> String:
+	## Stable, unique, deterministic id for a new playlist: the first
+	## "playlist-1", "playlist-2", ... not already taken.
+	var index := 1
+	var candidate := "playlist-1"
+	while existing_ids.has(candidate):
+		index += 1
+		candidate = "playlist-%d" % index
+	return candidate
+
+
+static func sanitize_playlists(raw) -> Array:
+	## Recovers any usable playlist records. Ids are deduplicated, names
+	## are validated and made unique case-insensitively, and track arrays
+	## keep only structural entries. Unusable records are dropped.
+	var out: Array = []
+	if not (raw is Array):
+		return out
+	var ids: Array = []
+	var names: Array = []
+	var fallback_number := 0
+	for entry in raw:
+		fallback_number += 1
+		var record := sanitize_playlist_record(entry, ids, names, fallback_number)
+		if record.is_empty():
+			continue
+		ids.append(record["id"])
+		names.append(String(record["name"]).to_lower())
+		out.append(record)
+	return out
+
+
+static func sanitize_playlist_record(entry, reserved_ids: Array, reserved_names: Array, fallback_number: int) -> Dictionary:
+	if not (entry is Dictionary):
+		return {}
+	var id := String(entry.get("id", ""))
+	if id.is_empty() or reserved_ids.has(id):
+		# Recover an id-less (or duplicate-id) entry instead of dropping
+		# its tracks.
+		id = fresh_playlist_id(reserved_ids)
+	var name := sanitize_playlist_name(entry.get("name", ""), "")
+	if name.is_empty():
+		name = "Playlist %d" % fallback_number
+	# Deterministic fallback names must still be unique: append a numeric
+	# suffix (trimmed into the length cap) while the lowercase form is
+	# already reserved.
+	var base := name
+	var index := 2
+	while reserved_names.has(name.to_lower()):
+		var suffix := " %d" % index
+		var head := base
+		if head.length() + suffix.length() > MAX_PLAYLIST_NAME_LENGTH:
+			head = base.substr(0, MAX_PLAYLIST_NAME_LENGTH - suffix.length()).strip_edges()
+		name = head + suffix
+		index += 1
+	var raw_tracks = entry.get("tracks")
+	var tracks: Array = raw_tracks if raw_tracks is Array else []
+	return {"id": id, "name": name, "tracks": _sanitize_playlist(tracks)}
+
+
 # ------------------------------------------------------------------- results
 
 func append_result(profile_id: String, mode_key: String, result: Dictionary, higher_is_better: bool) -> int:
@@ -734,6 +998,14 @@ static func _profiles_deep_copy(source: Array) -> Array:
 	return out
 
 
+static func _playlists_deep_copy(source: Array) -> Array:
+	var out: Array = []
+	for playlist in source:
+		if playlist is Dictionary:
+			out.append((playlist as Dictionary).duplicate(true))
+	return out
+
+
 static func _sanitize_volume(value, fallback: float) -> float:
 	if value is float or value is int:
 		return clampf(float(value), 0.0, 1.0)
@@ -741,9 +1013,11 @@ static func _sanitize_volume(value, fallback: float) -> float:
 
 
 static func _sanitize_playlist(raw: Array) -> Array:
-	# Structural sanitization only (strings, no duplicates, no empties);
-	# checking IDs against the scanned audio library is the audio
-	# manager's job because it knows which tracks exist.
+	# Structural sanitization only for one playlist's track array (strings,
+	# no duplicates, no empties); checking IDs against the scanned audio
+	# library is the audio manager's job because it knows which tracks
+	# exist. Empty arrays stay empty: empty playlists are valid editing
+	# targets.
 	var out: Array = []
 	var seen := {}
 	for track_id in raw:

@@ -3,10 +3,11 @@ extends CanvasLayer
 ## Reset) with a bounded, windowed row list; the profile-targeted keyboard
 ## bindings page with live keyboard capture; the guided controller
 ## rebinding flow (3-second pad claim, then one capture per canonical
-## action, review, commit); playlist editor; theme selection/reload; and
-## resets. All changes are committed through host commands so the host
-## stays the orchestration boundary. Visual values come from the resolved
-## theme tokens.
+## action, review, commit); the playlist manager (catalog, per-playlist
+## editor with add/remove/reorder, playback actions, delete confirmation);
+## theme selection/reload; and resets. All changes are committed through
+## host commands so the host stays the orchestration boundary. Visual
+## values come from the resolved theme tokens.
 
 const DefaultBindings = preload("res://scripts/input/default_bindings.gd")
 const BindingCapture = preload("res://scripts/ui/binding_capture.gd")
@@ -66,7 +67,10 @@ var _capture: Node = null
 var _claim: Node = null
 var _rows: Array = []
 var _selected: int = 0
-var _mode: String = "controls"  # controls|display|audio|reset|kb|padbind|playlist
+# settings sub-view. The playlist manager uses three: "playlist" (catalog
+# landing), "playlist_detail" (one playlist's editor), and
+# "playlist_delete" (delete confirmation).
+var _mode: String = "controls"  # controls|display|audio|reset|kb|padbind|playlist|playlist_detail|playlist_delete
 var _nav: UiNavigation = UiNavigation.new()
 var _tokens: Dictionary = ThemeProfile.default_tokens()
 # Theme fonts: body for rows/status, title for the heading; applied to
@@ -86,6 +90,13 @@ var _pad_captured: Dictionary = {}
 # every mutation commits atomically through the host command.
 var _kb_profile_id: String = ""
 var _kb_profile: Dictionary = {}
+
+# --- Playlist manager state ---
+# The catalog/detail/delete sub-modes target one playlist id; the delete
+# index anchors the deterministic post-delete selection.
+var _playlist_id: String = ""
+var _playlist_delete_index: int = 0
+var _playlist_track_set: Dictionary = {}
 
 
 func _ready() -> void:
@@ -209,6 +220,13 @@ func refresh() -> void:
 
 
 func _rebuild() -> void:
+	# A manager sub-mode targeting a playlist that vanished (deleted from
+	# the OSK rename flow, or a reset elsewhere) falls back to the catalog.
+	if _mode == "playlist_detail" and not _host.playlist_exists(_playlist_id):
+		_mode = "playlist"
+	if _mode == "playlist_delete" and not _host.playlist_exists(_playlist_id):
+		_mode = "playlist"
+	_playlist_track_set.clear()
 	_rows = _build_rows()
 	_selected = clampi(_selected, 0, maxi(0, _rows.size() - 1))
 	_ensure_selectable()
@@ -228,8 +246,14 @@ func _refresh_title() -> void:
 			_title.text = "CONTROLLER BINDINGS"
 			_update_padbind_status()
 		"playlist":
-			_title.text = "PLAYLIST EDITOR"
-			_status.text = "Enter: add/remove    Left/Right: reorder    Esc: back"
+			_title.text = "PLAYLIST MANAGER"
+			_status.text = "Enter: open playlist / play song    Left/Right on a playlist: play    Esc: back"
+		"playlist_detail":
+			_title.text = "PLAYLIST - %s" % _host.playlist_name(_playlist_id).to_upper()
+			_status.text = "Enter: add/remove/play    Left/Right: reorder    Esc: back"
+		"playlist_delete":
+			_title.text = "DELETE PLAYLIST"
+			_status.text = "Enter: confirm delete    Esc: cancel"
 
 
 # --------------------------------------------------------------------- rows
@@ -262,7 +286,9 @@ func _build_rows() -> Array:
 			rows.append(_command("music_preview", "Preview Track"))
 			rows.append(_toggle("normalize_custom_music", "Normalize Custom Music"))
 			rows.append(_command("music_rescan", "Rescan Music Library"))
-			rows.append(_command("music_editor", "Playlist Editor"))
+			rows.append(_command("music_editor", "Playlist Manager"))
+			rows.append(_note(_host.music_now_playing_summary()))
+			rows.append(_note("F1: skip current track"))
 			rows.append(_note("Custom music must be legally obtained."))
 			rows.append(_command("back", "Back"))
 		"reset":
@@ -285,12 +311,23 @@ func _build_rows() -> Array:
 				rows.append(_command("pad_finish", "FINISH AND SAVE"))
 			rows.append(_command("pad_cancel", "CANCEL"))
 		"playlist":
-			var playlist: Array = _host.settings.music_playlist
-			rows.append(_header("PLAYLIST - %d TRACKS" % playlist.size()))
-			if playlist.is_empty():
-				rows.append(_note("Empty - add tracks from the library below"))
-			for i in playlist.size():
-				rows.append({"kind": "playlist_entry", "index": i, "id": playlist[i]})
+			# Catalog landing: current playback state, the playlist list,
+			# and the whole library (Enter plays a song as Single).
+			rows.append(_note(_host.music_now_playing_summary()))
+			rows.append(_note("F1: skip current track"))
+			rows.append(_command("playlist_create", "Create Playlist"))
+			var playlists: Array = _host.playlists()
+			if playlists.is_empty():
+				rows.append(_note("No playlists yet"))
+			else:
+				rows.append(_header("PLAYLISTS"))
+				for playlist in playlists:
+					rows.append({
+						"kind": "playlist_item",
+						"id": playlist["id"],
+						"label": playlist["name"],
+						"track_count": (playlist["tracks"] as Array).size(),
+					})
 			rows.append(_header("LIBRARY"))
 			var track_ids: Array = _host.audio_track_ids()
 			if track_ids.is_empty():
@@ -298,6 +335,35 @@ func _build_rows() -> Array:
 			for track_id in track_ids:
 				rows.append({"kind": "library_track", "id": track_id})
 			rows.append(_command("back", "Back"))
+		"playlist_detail":
+			# One playlist's editor: playback actions and rename/delete,
+			# then the ordered track list and the library to add from.
+			var detail_tracks: Array = _host.playlist_tracks(_playlist_id)
+			for track_id in detail_tracks:
+				_playlist_track_set[track_id] = true
+			rows.append(_command("playlist_play", "Play In Order"))
+			rows.append(_command("playlist_shuffle", "Shuffle Playlist"))
+			rows.append(_command("playlist_rename", "Rename"))
+			rows.append(_command("playlist_delete", "Delete"))
+			rows.append(_header("TRACKS - %d" % detail_tracks.size()))
+			if detail_tracks.is_empty():
+				rows.append(_note("Empty - add tracks from the library below"))
+			for i in detail_tracks.size():
+				rows.append({"kind": "playlist_entry", "index": i, "id": detail_tracks[i]})
+			rows.append(_header("LIBRARY"))
+			var detail_track_ids: Array = _host.audio_track_ids()
+			if detail_track_ids.is_empty():
+				rows.append(_note("No tracks - place files in %s" % _host.audio_music_dir_hint()))
+			for track_id in detail_track_ids:
+				rows.append({"kind": "library_track", "id": track_id})
+			rows.append(_command("back", "Back"))
+		"playlist_delete":
+			# Delete confirmation: destructive actions never fire without
+			# this explicit two-step consent.
+			rows.append(_note("Delete '%s'?" % _host.playlist_name(_playlist_id)))
+			rows.append(_note("This cannot be undone."))
+			rows.append(_command("playlist_delete_confirm", "YES, DELETE"))
+			rows.append(_command("playlist_delete_cancel", "CANCEL"))
 	return rows
 
 
@@ -345,6 +411,8 @@ func _row_label(row: Dictionary) -> String:
 			return _action_label(row["action"])
 		"playlist_entry", "library_track":
 			return _host.audio_track_title(row["id"])
+		"playlist_item":
+			return String(row["label"])
 		"toggle", "cycle", "volume", "command", "music_mode", "menu_music_track", "music_track", "theme", "category":
 			return row["label"]
 	return ""
@@ -385,10 +453,20 @@ func _row_value(row: Dictionary) -> String:
 		"playlist_entry":
 			return "%d." % (row["index"] + 1)
 		"library_track":
-			return "Added" if settings.music_playlist.has(row["id"]) else ""
+			if _mode == "playlist_detail":
+				# The editor marks the songs already in the target list.
+				return "Added" if _playlist_track_set.has(row["id"]) else ""
+			return "Playing" if _host.music_current_track_id() == row["id"] else ""
+		"playlist_item":
+			var active_marker := "ACTIVE - " if _host.active_playlist_id() == row["id"] else ""
+			return "%s%d tracks" % [active_marker, row["track_count"]]
 		"command":
 			if row["id"] == "music_preview":
 				return "PLAYING" if _host.music_previewing() else ""
+			if row["id"] == "playlist_play" and _mode == "playlist_detail":
+				return "ACTIVE" if _playlist_is_ordered_source() else ""
+			if row["id"] == "playlist_shuffle" and _mode == "playlist_detail":
+				return "ACTIVE" if _playlist_is_shuffle_source() else ""
 			return ""
 		"theme":
 			return _theme_value()
@@ -430,7 +508,7 @@ func _render_rows() -> void:
 		return
 	for child in _rows_box.get_children():
 		child.queue_free()
-	var compact: bool = _mode == "playlist"
+	var compact: bool = _is_playlist_mode()
 	_rows_box.add_theme_constant_override("separation", 2 if compact else 4)
 	var font_size := 17 if compact else 22
 	var name_width := 500.0 if compact else 420.0
@@ -486,12 +564,42 @@ func _render_rows() -> void:
 		_add_window_marker()
 
 
+## True while one of the playlist manager's modes is showing; those lists
+## render compact and window tightly like the old playlist editor.
+func _is_playlist_mode() -> bool:
+	return _mode == "playlist" or _mode == "playlist_detail" or _mode == "playlist_delete"
+
+
+## True while this screen (not its caller) owns raw input: a pending key
+## capture or an active guided-controller stage. The host's global F1
+## skip checks this so fixed shortcuts never fire mid-capture.
+func owns_raw_input() -> bool:
+	return visible and (
+		_capture.active
+		or _pad_stage == PAD_STAGE_CLAIM
+		or _pad_stage == PAD_STAGE_RELEASE
+		or _pad_stage == PAD_STAGE_CAPTURE
+	)
+
+
+## Host hook after an F1 skip: refresh the now-playing rows and surface
+## the skip result in the status line. Only the views that display music
+## state react; the delete confirmation keeps its prompt.
+func on_music_skipped(message: String) -> void:
+	if not visible:
+		return
+	if _mode != "audio" and _mode != "playlist" and _mode != "playlist_detail":
+		return
+	_rebuild()
+	_status.text = message
+
+
 ## Visible row window: scrolls the selection into view, bounded so no row
 ## renders outside the logical viewport. Returns [start, end).
 func _window_range() -> Array:
 	var capacity := (
 		MAX_VISIBLE_ROWS_COMPACT
-		if _mode == "playlist"
+		if _is_playlist_mode()
 		else MAX_VISIBLE_ROWS
 	)
 	if _rows.size() <= capacity:
@@ -625,10 +733,16 @@ func _activate() -> void:
 			_change_category(1)
 		"playlist_entry":
 			_play_nav_sfx("menu_confirm")
-			_remove_playlist_entry(row["index"])
+			_remove_playlist_track(row["index"])
+		"playlist_item":
+			_play_nav_sfx("menu_confirm")
+			_open_playlist_detail(String(row["id"]))
 		"library_track":
 			_play_nav_sfx("menu_confirm")
-			_add_playlist_entry(row["id"])
+			if _mode == "playlist_detail":
+				_add_track_to_playlist(String(row["id"]))
+			else:
+				_play_library_track(String(row["id"]))
 		"command":
 			_run_command(row["id"])
 
@@ -671,7 +785,10 @@ func _adjust(delta: int) -> void:
 			_change_category(delta)
 		"playlist_entry":
 			_play_nav_sfx("menu_move")
-			_move_playlist_entry(row["index"], delta)
+			_move_playlist_track(row["index"], delta)
+		"playlist_item":
+			_play_nav_sfx("menu_confirm")
+			_play_playlist_in_order(String(row["id"]))
 
 
 func _change_category(delta: int) -> void:
@@ -734,6 +851,29 @@ func _run_command(id: String) -> void:
 			_mode = "playlist"
 			_selected = 0
 			_rebuild()
+		"playlist_create":
+			var created: Dictionary = _host.cmd_playlist_create()
+			if bool(created.get("ok", false)):
+				_host.cmd_open_playlist_rename(String(created.get("id", "")))
+			else:
+				_status.text = String(created.get("message", ""))
+		"playlist_play":
+			var played: Dictionary = _host.cmd_playlist_play(_playlist_id)
+			# The rebuild resets the status line, so the result lands after.
+			_rebuild_preserving_selection()
+			_status.text = String(played.get("message", ""))
+		"playlist_shuffle":
+			var shuffled: Dictionary = _host.cmd_playlist_shuffle(_playlist_id)
+			_rebuild_preserving_selection()
+			_status.text = String(shuffled.get("message", ""))
+		"playlist_rename":
+			_host.cmd_open_playlist_rename(_playlist_id)
+		"playlist_delete":
+			_enter_playlist_delete()
+		"playlist_delete_confirm":
+			_confirm_playlist_delete()
+		"playlist_delete_cancel":
+			_cancel_playlist_delete()
 		"reset_kb":
 			_host.cmd_reset_keyboard_bindings(_host.settings.active_profile_id)
 			_status.text = "Keyboard bindings reset for %s" % _host.active_profile_name()
@@ -776,6 +916,12 @@ func _back() -> void:
 			_mode = "controls"
 		"playlist":
 			_mode = "audio"
+		"playlist_detail":
+			_mode = "playlist"
+		"playlist_delete":
+			# Esc cancels the pending delete and returns to the catalog.
+			_cancel_playlist_delete()
+			return
 	_selected = 0
 	_rebuild()
 
@@ -1003,38 +1149,152 @@ func _cycle_music_track(delta: int) -> void:
 	_render_rows()
 
 
-func _add_playlist_entry(track_id: String) -> void:
-	var playlist: Array = _host.settings.music_playlist.duplicate()
-	if playlist.has(track_id):
+# --------------------------------------------------------- playlist manager
+# The manager edits one playlist at a time through working copies of its
+# track array; every mutation commits atomically through a host command
+# and the rows rebuild with the selection preserved.
+
+func _open_playlist_detail(playlist_id: String) -> void:
+	if not _host.playlist_exists(playlist_id):
+		_status.text = "Playlist no longer exists"
+		_rebuild_preserving_selection()
+		return
+	_playlist_id = playlist_id
+	_mode = "playlist_detail"
+	_selected = 0
+	_rebuild()
+
+
+func _add_track_to_playlist(track_id: String) -> void:
+	var tracks: Array = _host.playlist_tracks(_playlist_id)
+	if tracks.has(track_id):
 		_status.text = "Already in the playlist"
 		return
-	playlist.append(track_id)
-	_host.cmd_music_playlist_changed(playlist)
-	_status.text = "Added: %s" % _host.audio_track_title(track_id)
+	tracks.append(track_id)
+	var result: Dictionary = _host.cmd_playlist_set_tracks(_playlist_id, tracks)
+	# Rebuild before reporting: the rebuild resets the status line.
 	_rebuild_preserving_selection()
+	if bool(result.get("ok", false)):
+		_status.text = "Added: %s" % _host.audio_track_title(track_id)
+	else:
+		_status.text = String(result.get("message", ""))
 
 
-func _remove_playlist_entry(index: int) -> void:
-	var playlist: Array = _host.settings.music_playlist.duplicate()
-	if index < 0 or index >= playlist.size():
+func _remove_playlist_track(index: int) -> void:
+	var tracks: Array = _host.playlist_tracks(_playlist_id)
+	if index < 0 or index >= tracks.size():
 		return
-	var title: String = _host.audio_track_title(playlist[index])
-	playlist.remove_at(index)
-	_host.cmd_music_playlist_changed(playlist)
-	_status.text = "Removed: %s" % title
+	var title: String = _host.audio_track_title(String(tracks[index]))
+	tracks.remove_at(index)
+	var result: Dictionary = _host.cmd_playlist_set_tracks(_playlist_id, tracks)
+	# Rebuild before reporting: the rebuild resets the status line.
 	_rebuild_preserving_selection()
+	if bool(result.get("ok", false)):
+		_status.text = "Removed: %s" % title
+	else:
+		_status.text = String(result.get("message", ""))
 
 
-func _move_playlist_entry(index: int, delta: int) -> void:
-	var playlist: Array = _host.settings.music_playlist.duplicate()
+func _move_playlist_track(index: int, delta: int) -> void:
+	var tracks: Array = _host.playlist_tracks(_playlist_id)
 	var target: int = index + delta
-	if index < 0 or index >= playlist.size() or target < 0 or target >= playlist.size():
+	if index < 0 or index >= tracks.size() or target < 0 or target >= tracks.size():
 		return
-	var swapped = playlist[index]
-	playlist[index] = playlist[target]
-	playlist[target] = swapped
-	_host.cmd_music_playlist_changed(playlist)
+	var swapped = tracks[index]
+	tracks[index] = tracks[target]
+	tracks[target] = swapped
+	_host.cmd_playlist_set_tracks(_playlist_id, tracks)
 	_rebuild_preserving_selection()
+
+
+func _play_playlist_in_order(playlist_id: String) -> void:
+	# Left/Right on a catalog playlist row: same action as the editor's
+	# Play In Order.
+	var result: Dictionary = _host.cmd_playlist_play(playlist_id)
+	_rebuild_preserving_selection()
+	_status.text = String(result.get("message", ""))
+
+
+func _play_library_track(track_id: String) -> void:
+	# Catalog library row: play one song immediately as Single.
+	var result: Dictionary = _host.cmd_music_play_track(track_id)
+	_rebuild_preserving_selection()
+	_status.text = String(result.get("message", ""))
+
+
+func _playlist_is_ordered_source() -> bool:
+	# True when the detail playlist is the active ordered-playback source.
+	return _host.active_playlist_id() == _playlist_id and _host.settings.music_mode == "playlist"
+
+
+func _playlist_is_shuffle_source() -> bool:
+	# True when the detail playlist is the active playlist-scoped shuffle
+	# source.
+	return (
+		_host.active_playlist_id() == _playlist_id
+		and _host.settings.music_mode == "shuffle"
+		and _host.settings.music_shuffle_source == "playlist"
+	)
+
+
+func _enter_playlist_delete() -> void:
+	# Confirmation state: remember the catalog position so the selection
+	# after delete/cancel is deterministic.
+	var playlists: Array = _host.playlists()
+	_playlist_delete_index = 0
+	for i in playlists.size():
+		if String(playlists[i]["id"]) == _playlist_id:
+			_playlist_delete_index = i
+			break
+	_mode = "playlist_delete"
+	_selected = 0
+	_rebuild()
+
+
+func _confirm_playlist_delete() -> void:
+	var result: Dictionary = _host.cmd_playlist_delete(_playlist_id)
+	_mode = "playlist"
+	_selected = 0
+	_rebuild()
+	_status.text = String(result.get("message", ""))
+	_select_playlist_after_delete()
+
+
+func _cancel_playlist_delete() -> void:
+	_mode = "playlist"
+	_selected = 0
+	_rebuild()
+	_select_playlist_row(_playlist_id)
+	_status.text = "Delete cancelled"
+
+
+## Deterministic post-delete selection: the playlist that took the deleted
+## one's position (or the new last one, or the Create row when none
+## remain).
+func _select_playlist_after_delete() -> void:
+	var item_rows: Array = []
+	var create_row := -1
+	for i in _rows.size():
+		if String(_rows[i].get("kind")) == "playlist_item":
+			item_rows.append(i)
+		if String(_rows[i].get("kind")) == "command" and String(_rows[i].get("id")) == "playlist_create":
+			create_row = i
+	if item_rows.is_empty():
+		if create_row >= 0:
+			_selected = create_row
+			_render_rows()
+		return
+	_selected = item_rows[mini(_playlist_delete_index, item_rows.size() - 1)]
+	_render_rows()
+
+
+func _select_playlist_row(playlist_id: String) -> void:
+	for i in _rows.size():
+		var row: Dictionary = _rows[i]
+		if String(row.get("kind")) == "playlist_item" and String(row.get("id")) == playlist_id and _is_selectable(i):
+			_selected = i
+			_render_rows()
+			return
 
 
 func _rebuild_preserving_selection() -> void:

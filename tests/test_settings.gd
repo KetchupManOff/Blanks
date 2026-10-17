@@ -27,7 +27,7 @@ func _make_record(score: int, elapsed: float, completed: int, players: int = 1, 
 
 func test_defaults() -> void:
 	var s := SettingsClass.new()
-	check_eq(s.SCHEMA_VERSION, 3, "schema version is 3")
+	check_eq(s.SCHEMA_VERSION, 4, "schema version is 4")
 	check_eq(s.profiles.size(), 1, "one default profile")
 	var p: Dictionary = s.profiles[0]
 	check_eq(p["name"], "Player 1", "default profile name")
@@ -185,7 +185,7 @@ func test_v2_migrates_shared_keyboard_into_profiles() -> void:
 	f.close()
 	var s := SettingsClass.new()
 	check_true(s.load(PATH), "v2 file loads through migration")
-	check_eq(s.SCHEMA_VERSION, 3, "model reports v3 after migration")
+	check_eq(s.SCHEMA_VERSION, 4, "model reports v4 after migration")
 	check_eq(s.keyboard_bindings_for("pa")["move_left"], [DefaultBindings.key_record(KEY_A)], "shared keyboard copied into profile A")
 	check_eq(s.keyboard_bindings_for("pb")["move_left"], [DefaultBindings.key_record(KEY_A)], "shared keyboard copied into profile B")
 	check_eq(s.keyboard_bindings_for("pa")["hard_drop"], [DefaultBindings.key_record(KEY_SPACE)], "every action of the shared profile copied")
@@ -242,7 +242,7 @@ func test_v1_migrates_to_v3() -> void:
 	f.close()
 	var s := SettingsClass.new()
 	check_true(s.load(PATH), "v1 file loads through migration")
-	check_eq(s.SCHEMA_VERSION, 3, "model reports v3 after migration")
+	check_eq(s.SCHEMA_VERSION, 4, "model reports v4 after migration")
 	check_eq(s.fullscreen, true, "display section preserved")
 	check_eq(s.window_scale, 2, "display scale preserved")
 	check_true(is_equal_approx(s.master_volume, 0.5), "audio preserved")
@@ -642,6 +642,222 @@ func test_results_trimmed_on_load() -> void:
 	var history: Array = s.profile_history("px", "solo_marathon")
 	check_eq(history.size(), SettingsClass.MAX_RESULTS_PER_MODE, "overlong history trimmed on load")
 	check_eq(history[0]["score"], 107, "the best five retained")
+
+
+# -------------------------------------------------------------- playlists
+
+func test_playlist_defaults_and_roundtrip() -> void:
+	var s := SettingsClass.new()
+	check_eq(s.music_playlists.size(), 0, "no playlists by default")
+	check_eq(s.active_music_playlist_id, "", "no active playlist by default")
+	check_eq(s.music_shuffle_source, "library", "shuffle draws from the library by default")
+	var id := s.create_playlist("Chill")
+	check_true(id != "", "playlist created")
+	check_true(s.set_playlist_tracks(id, ["user://music/x.ogg", "user://music/y.wav"]), "tracks set")
+	check_true(s.set_active_playlist(id), "playlist activated")
+	s.music_shuffle_source = "playlist"
+	check_true(s.save(PATH), "save succeeds")
+	var loaded := SettingsClass.new()
+	check_true(loaded.load(PATH), "load succeeds")
+	check_eq(loaded.music_playlists.size(), 1, "playlist record round trips")
+	check_eq(loaded.playlist_name(id), "Chill", "name round trips")
+	check_eq(loaded.playlist_tracks(id), ["user://music/x.ogg", "user://music/y.wav"], "ordered tracks round trip")
+	check_eq(loaded.active_music_playlist_id, id, "active id round trips")
+	check_eq(loaded.music_shuffle_source, "playlist", "shuffle source round trips")
+
+
+func test_playlist_empty_lists_stay_empty() -> void:
+	var s := SettingsClass.new()
+	var id := s.create_playlist("Empty")
+	check_true(id != "", "empty playlist created")
+	check_eq(s.playlist_tracks(id), [], "empty tracks stay empty")
+	check_true(s.playlist_name_taken("Empty"), "empty playlist still owns its name")
+	check_false(s.rename_playlist(id, "   "), "blank rename rejected")
+
+
+func test_playlist_malformed_records_sanitized() -> void:
+	var payload := {
+		"version": 4,
+		"audio": {"music_playlists": [
+			"junk",
+			{"name": "Alpha", "tracks": ["a.ogg", "a.ogg", 7, "", "b.ogg"]},
+			{"id": "shared", "name": "Beta"},
+			{"id": "shared", "tracks": "not an array"},
+			{"tracks": ["c.ogg"]},
+		]},
+	}
+	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(payload))
+	f.close()
+	var s := SettingsClass.new()
+	check_true(s.load(PATH), "payload applies")
+	check_eq(s.music_playlists.size(), 4, "junk record dropped, four survive")
+	var alpha := s.find_playlist("playlist-1")
+	check_eq(alpha["name"], "Alpha", "first record keeps its id")
+	check_eq(alpha["tracks"], ["a.ogg", "b.ogg"], "duplicate/non-string tracks dropped in order")
+	var beta := s.find_playlist("shared")
+	check_eq(String(beta["name"]), "Beta", "existing id kept")
+	check_false(s.find_playlist("playlist-1").is_empty(), "idless first record recovered with a fresh id")
+	var recovered: Dictionary = s.music_playlists[3]
+	check_eq(recovered["tracks"], ["c.ogg"], "duplicate-id record's tracks recovered")
+	check_true(recovered["id"] != "shared", "duplicate id replaced with a fresh one")
+	var names: Array = []
+	var seen := {}
+	var all_unique := true
+	for playlist in s.music_playlists:
+		var lower: String = String(playlist["name"]).to_lower()
+		if seen.has(lower):
+			all_unique = false
+		seen[lower] = true
+		names.append(lower)
+	check_true(all_unique, "names unique case-insensitively")
+	check_eq(names.size(), 4, "all recovered records named")
+
+
+func test_playlist_naming_rules() -> void:
+	var s := SettingsClass.new()
+	check_eq(SettingsClass.sanitize_playlist_name("  Road  Trip \n Mix ", "fallback"), "Road Trip Mix", "trimmed, single line, collapsed whitespace")
+	check_eq(SettingsClass.sanitize_playlist_name("AB".repeat(40), "fallback").length(), SettingsClass.MAX_PLAYLIST_NAME_LENGTH, "playlist names cap at 24 characters")
+	check_eq(SettingsClass.sanitize_playlist_name("   ", "fallback"), "fallback", "blank names fall back")
+	var id := s.create_playlist("Mix")
+	check_true(id != "", "playlist created")
+	check_eq(s.create_playlist("mix"), "", "duplicate name rejected case-insensitively")
+	check_true(s.rename_playlist(id, "MIX"), "rename to the same (case-changed) own name succeeds")
+	var other := s.create_playlist("Beta")
+	check_true(other != "", "second playlist created")
+	check_false(s.rename_playlist(id, "beta"), "rename rejected when it duplicates another playlist")
+	check_eq(s.playlist_name_taken("MIX"), true, "taken check reads the renamed form")
+
+
+func test_playlist_rename_delete_and_active_pointer() -> void:
+	var s := SettingsClass.new()
+	var id_a := s.create_playlist("Alpha")
+	var id_b := s.create_playlist("Beta")
+	check_true(id_a != "" and id_b != "", "two playlists created")
+	check_true(s.set_active_playlist(id_a), "A activated")
+	check_true(s.rename_playlist(id_a, "Gamma"), "rename succeeds")
+	check_eq(s.playlist_name(id_a), "Gamma", "rename applied")
+	check_false(s.rename_playlist(id_a, "beta"), "rename rejected when it duplicates another playlist")
+	check_false(s.rename_playlist("ghost", "X"), "rename of a missing playlist fails")
+	check_true(s.delete_playlist(id_a), "delete succeeds")
+	check_eq(s.active_music_playlist_id, "", "deleting the active playlist clears the pointer")
+	check_eq(s.music_playlists.size(), 1, "one playlist remains")
+	check_true(s.set_active_playlist(id_b), "B can be activated")
+	check_true(s.delete_playlist(id_b), "second delete succeeds")
+	check_false(s.delete_playlist(id_b), "deleting a missing playlist fails")
+	check_false(s.set_active_playlist("ghost"), "activating a missing playlist fails")
+
+
+func test_playlist_ids_stable_and_unique() -> void:
+	check_eq(SettingsClass.fresh_playlist_id([]), "playlist-1", "first id")
+	check_eq(SettingsClass.fresh_playlist_id(["playlist-1"]), "playlist-2", "second id")
+	check_eq(SettingsClass.fresh_playlist_id(["playlist-2", "playlist-3"]), "playlist-1", "gaps reused")
+	var s := SettingsClass.new()
+	s.create_playlist("One")
+	var second := s.create_playlist("Two")
+	check_eq(second, "playlist-2", "created ids follow the stable sequence")
+
+
+func test_unique_playlist_name_suffixes() -> void:
+	var s := SettingsClass.new()
+	check_eq(s.unique_playlist_name("New Playlist"), "New Playlist", "first name is free")
+	s.create_playlist("New Playlist")
+	check_eq(s.unique_playlist_name("New Playlist"), "New Playlist 2", "first collision gets 2")
+	s.create_playlist("New Playlist 2")
+	check_eq(s.unique_playlist_name("New Playlist"), "New Playlist 3", "second collision gets 3")
+
+
+func test_playlist_reset_clears_everything() -> void:
+	var s := SettingsClass.new()
+	var id := s.create_playlist("Gone")
+	s.set_active_playlist(id)
+	s.music_shuffle_source = "playlist"
+	s.reset_to_defaults()
+	check_eq(s.music_playlists.size(), 0, "reset clears playlists")
+	check_eq(s.active_music_playlist_id, "", "reset clears the active id")
+	check_eq(s.music_shuffle_source, "library", "reset restores the library shuffle source")
+
+
+func test_v3_legacy_playlist_becomes_named_playlist() -> void:
+	var payload := {
+		"version": 3,
+		"audio": {"music_playlist": ["user://music/z.wav", "user://music/a.wav", "user://music/a.wav"]},
+	}
+	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(payload))
+	f.close()
+	var s := SettingsClass.new()
+	check_true(s.load(PATH), "v3 file loads through migration")
+	check_eq(s.SCHEMA_VERSION, 4, "model reports v4 after migration")
+	check_eq(s.music_playlists.size(), 1, "legacy playlist becomes one record")
+	var playlist: Dictionary = s.music_playlists[0]
+	check_eq(playlist["name"], "My Playlist", "migrated record named My Playlist")
+	check_eq(playlist["tracks"], ["user://music/z.wav", "user://music/a.wav"], "legacy order preserved, duplicates dropped")
+	check_eq(s.active_music_playlist_id, playlist["id"], "migrated playlist active")
+	check_true(s.save(PATH), "save succeeds")
+	var raw := FileAccess.open(PATH, FileAccess.READ).get_as_text()
+	var saved: Dictionary = JSON.parse_string(raw)
+	check_false((saved["audio"] as Dictionary).has("music_playlist"), "legacy flat array never re-serialized")
+	check_true((saved["audio"] as Dictionary).has("music_playlists"), "named playlists serialized")
+	var reloaded := SettingsClass.new()
+	check_true(reloaded.load(PATH), "migrated file reloads as v4")
+
+
+func test_v3_legacy_empty_playlist_starts_with_none() -> void:
+	var payload := {"version": 3, "audio": {"music_playlist": []}}
+	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(payload))
+	f.close()
+	var s := SettingsClass.new()
+	check_true(s.load(PATH), "v3 file loads")
+	check_eq(s.music_playlists.size(), 0, "empty legacy playlist starts with no playlists")
+	check_eq(s.active_music_playlist_id, "", "no active playlist")
+
+
+func test_v1_and_v2_legacy_playlists_migrate() -> void:
+	var v1 := {
+		"version": 1,
+		"display": {"fullscreen": true},
+		"audio": {"music_playlist": ["user://music/one.ogg", "user://music/two.ogg"]},
+	}
+	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(v1))
+	f.close()
+	var s := SettingsClass.new()
+	check_true(s.load(PATH), "v1 file loads through migration")
+	check_eq(s.music_playlists.size(), 1, "v1 legacy playlist becomes one record")
+	check_eq(s.music_playlists[0]["tracks"], ["user://music/one.ogg", "user://music/two.ogg"], "v1 track order preserved")
+	check_eq(s.active_music_playlist_id, s.music_playlists[0]["id"], "v1 migrated playlist active")
+	var v2 := {
+		"version": 2,
+		"audio": {"music_playlist": ["user://music/three.mp3"]},
+	}
+	f = FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(v2))
+	f.close()
+	var s2 := SettingsClass.new()
+	check_true(s2.load(PATH), "v2 file loads through migration")
+	check_eq(s2.music_playlists[0]["tracks"], ["user://music/three.mp3"], "v2 legacy playlist migrated")
+	check_eq(s2.active_music_playlist_id, s2.music_playlists[0]["id"], "v2 migrated playlist active")
+
+
+func test_hybrid_file_prefers_named_playlists() -> void:
+	# A file carrying both shapes (never written by real versions) prefers
+	# the modern records and never merges the legacy array in.
+	var payload := {
+		"version": 4,
+		"audio": {
+			"music_playlists": [{"id": "p1", "name": "Modern", "tracks": ["a.ogg"]}],
+			"music_playlist": ["legacy.ogg"],
+		},
+	}
+	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify(payload))
+	f.close()
+	var s := SettingsClass.new()
+	check_true(s.load(PATH), "payload applies")
+	check_eq(s.music_playlists.size(), 1, "modern records win")
+	check_eq(s.music_playlists[0]["tracks"], ["a.ogg"], "legacy array ignored")
 
 
 # -------------------------------------------------------- competitive records

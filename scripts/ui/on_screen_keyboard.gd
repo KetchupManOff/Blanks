@@ -2,17 +2,25 @@ extends CanvasLayer
 ## Focused name-entry layer: a controller-navigable grid of allowed
 ## characters with DEL / OK / CANCEL controls, plus direct physical
 ## keyboard typing. While open it consumes all key and controller UI
-## navigation input so nothing beneath reacts. Duplicate and blank names
-## are validated against the host's profile list before committing; the
-## host routes the committed name by the flow that opened the keyboard.
+## navigation input so nothing beneath reacts. Blank names and duplicates
+## are validated against the host before committing (profiles or named
+## playlists, per the entry context); the host routes the committed name
+## by the flow that opened the keyboard.
 
 signal name_committed(name: String)
 signal entry_cancelled()
 
 const ThemeProfile = preload("res://scripts/ui/theme_profile.gd")
 const UiNavigation = preload("res://scripts/ui/ui_navigation.gd")
+const SettingsClass = preload("res://scripts/persistence/settings.gd")
 
 const MAX_NAME_LENGTH := 16
+
+## Entry contexts: "profile" validates against the profile list with the
+## 16-character cap; "playlist" validates playlist names with their own
+## 24-character cap.
+const CONTEXT_PROFILE := "profile"
+const CONTEXT_PLAYLIST := "playlist"
 
 ## Character grid (6 columns) followed by the control row.
 const CHAR_ROWS := [
@@ -44,7 +52,11 @@ var _title_font: Font = null
 
 var _text: String = ""
 var _cursor: int = 0
-var _exclude_profile_id: String = ""
+## Record id excluded from the duplicate check while renaming itself
+## (profile id or playlist id, depending on the entry context).
+var _exclude_id: String = ""
+## Which name list this entry validates against (see CONTEXT_*).
+var _context: String = CONTEXT_PROFILE
 
 
 func _ready() -> void:
@@ -181,7 +193,23 @@ func apply_theme(tokens: Dictionary, media: Dictionary) -> void:
 
 func open(initial_text: String, title: String, exclude_profile_id: String = "") -> void:
 	_text = initial_text
-	_exclude_profile_id = exclude_profile_id
+	_exclude_id = exclude_profile_id
+	_context = CONTEXT_PROFILE
+	_cursor = 0
+	_title.text = title
+	_status.text = "D-pad / Arrows: move    A / Enter: pick    B / Esc: cancel    type to add"
+	_nav.reset()
+	_refresh()
+	visible = true
+
+
+func open_playlist(initial_text: String, title: String, exclude_playlist_id: String = "") -> void:
+	## Playlist-name entry: same grid and typing behavior with the
+	## playlist length cap and duplicate validation against the playlist
+	## list instead of the profiles.
+	_text = initial_text
+	_exclude_id = exclude_playlist_id
+	_context = CONTEXT_PLAYLIST
 	_cursor = 0
 	_title.text = title
 	_status.text = "D-pad / Arrows: move    A / Enter: pick    B / Esc: cancel    type to add"
@@ -290,9 +318,21 @@ func _activate_cell() -> void:
 			_cancel()
 
 
+func _max_length() -> int:
+	return SettingsClass.MAX_PLAYLIST_NAME_LENGTH if _context == CONTEXT_PLAYLIST else MAX_NAME_LENGTH
+
+
+func _name_taken(candidate: String) -> bool:
+	if _host == null:
+		return false
+	if _context == CONTEXT_PLAYLIST:
+		return _host.playlist_name_taken(candidate, _exclude_id)
+	return _host.profile_name_taken(candidate, _exclude_id)
+
+
 func _type_char(letter: String) -> void:
-	if _text.length() >= MAX_NAME_LENGTH:
-		_status.text = "Name too long (max %d characters)" % MAX_NAME_LENGTH
+	if _text.length() >= _max_length():
+		_status.text = "Name too long (max %d characters)" % _max_length()
 		_refresh()
 		return
 	_text += letter
@@ -314,7 +354,7 @@ func _confirm() -> void:
 		_status.text = "Name cannot be empty"
 		_refresh()
 		return
-	if _host != null and _host.profile_name_taken(candidate, _exclude_profile_id):
+	if _name_taken(candidate):
 		_status.text = "That name is already in use"
 		_refresh()
 		return

@@ -629,6 +629,7 @@ func _apply_theme() -> void:
 	_pause_menu.apply_theme(tokens, media)
 	_profile_screen.apply_theme(tokens, media)
 	_osk.apply_theme(tokens, media)
+	_online_menu.apply_theme(tokens, media)
 	_apply_coop_theme(tokens, media)
 	_apply_competitive_theme(tokens, media)
 
@@ -1170,6 +1171,17 @@ func cmd_open_name_rename(profile_id: String) -> void:
 	_osk.open(String(profile["name"]), "RENAME PROFILE", profile_id)
 
 
+func cmd_open_playlist_rename(playlist_id: String) -> void:
+	## Opens the shared on-screen keyboard to rename one playlist; the
+	## manager also uses this right after creation, where cancelling keeps
+	## the generated playlist under its current name.
+	var playlist := settings.find_playlist(playlist_id)
+	if playlist.is_empty():
+		return
+	_name_entry_context = {"purpose": "playlist_rename", "playlist_id": playlist_id}
+	_osk.open_playlist(String(playlist["name"]), "RENAME PLAYLIST", playlist_id)
+
+
 func _on_name_committed(name: String) -> void:
 	# The OSK validated blank/duplicate names before emitting.
 	var context := _name_entry_context
@@ -1189,13 +1201,18 @@ func _on_name_committed(name: String) -> void:
 			if settings.rename_profile(String(context.get("profile_id", "")), name):
 				settings.save()
 			_profile_screen.refresh()
+		"playlist_rename":
+			cmd_playlist_rename(String(context.get("playlist_id", "")), name)
+			if _settings_screen != null:
+				_settings_screen.refresh()
 
 
 func _on_name_cancelled() -> void:
 	_name_entry_context = {}
-	if not _profile_screen.is_open():
-		return
-	_profile_screen.refresh()
+	if _profile_screen.is_open():
+		_profile_screen.refresh()
+	if _settings_screen != null:
+		_settings_screen.refresh()
 
 
 func cmd_profile_bind_controller(profile_id: String) -> void:
@@ -1414,13 +1431,18 @@ func theme_user_dir_hint() -> String:
 
 
 # ------------------------------------------------------------- music setup
-# Requested by the settings screen's audio rows and playlist editor. All
-# of them commit immediately, like every other settings change.
+# Requested by the settings screen's audio rows and the playlist manager.
+# All of them commit immediately, like every other settings change, and
+# every mutation returns a result the UI can report.
 
 func cmd_music_mode_changed(mode: String) -> void:
 	if not SettingsClass.MUSIC_MODES.has(mode):
 		return
 	settings.music_mode = mode
+	if mode == "shuffle":
+		# The Audio category's Shuffle stays library-wide: a playlist-
+		# scoped shuffle never leaks into it through the mode cycle.
+		settings.music_shuffle_source = "library"
 	settings.save()
 	_audio.apply_music_settings(settings)
 
@@ -1444,13 +1466,6 @@ func cmd_menu_music_selected(track_id: String) -> void:
 	_audio.apply_music_settings(settings)
 
 
-func cmd_music_playlist_changed(playlist: Array) -> void:
-	settings.music_playlist = playlist.duplicate()
-	_audio.sanitize_selection(settings)
-	settings.save()
-	_audio.apply_music_settings(settings)
-
-
 func cmd_music_rescan() -> void:
 	if _audio.rescan_library(settings):
 		settings.save()
@@ -1462,6 +1477,215 @@ func cmd_music_preview() -> void:
 
 func cmd_music_preview_stop() -> void:
 	_audio.stop_preview()
+
+
+## Sanitize against the scanned library (repairs ride along with the
+## change), persist, and re-apply playback. The single save/apply path for
+## every music mutation command.
+func _commit_music_settings() -> void:
+	_audio.sanitize_selection(settings)
+	settings.save()
+	_audio.apply_music_settings(settings)
+
+
+func cmd_playlist_create() -> Dictionary:
+	## Creates a uniquely named playlist ("New Playlist" plus a numeric
+	## suffix when taken); the manager opens rename right after, and
+	## cancelling keeps the playlist under the generated name.
+	var name := settings.unique_playlist_name(SettingsClass.NEW_PLAYLIST_BASE_NAME)
+	var playlist_id := settings.create_playlist(name)
+	if playlist_id.is_empty():
+		return {"ok": false, "id": "", "name": "", "message": "Could not create a playlist"}
+	settings.save()
+	return {"ok": true, "id": playlist_id, "name": name, "message": "Created: %s" % name}
+
+
+func cmd_playlist_rename(playlist_id: String, name: String) -> Dictionary:
+	if settings.rename_playlist(playlist_id, name):
+		settings.save()
+		return {"ok": true, "message": "Renamed to: %s" % settings.playlist_name(playlist_id)}
+	return {"ok": false, "message": "That name is already in use"}
+
+
+func cmd_playlist_set_tracks(playlist_id: String, tracks: Array) -> Dictionary:
+	## Replaces one playlist's whole ordered track array atomically.
+	if not settings.set_playlist_tracks(playlist_id, tracks):
+		return {"ok": false, "message": "Playlist no longer exists"}
+	_commit_music_settings()
+	return {"ok": true, "message": ""}
+
+
+func cmd_playlist_delete(playlist_id: String) -> Dictionary:
+	## Deletes one playlist after the manager's confirmation step. Deleting
+	## the active playback source falls normal playback back to Single
+	## (valid selected track, library shuffle source); deleting any other
+	## playlist changes nothing about playback.
+	var playlist := settings.find_playlist(playlist_id)
+	if playlist.is_empty():
+		return {"ok": false, "name": "", "message": "Playlist no longer exists"}
+	var name := String(playlist["name"])
+	var was_playback_source: bool = settings.active_music_playlist_id == playlist_id and (
+		settings.music_mode == "playlist"
+		or (settings.music_mode == "shuffle" and settings.music_shuffle_source == "playlist")
+	)
+	settings.delete_playlist(playlist_id)
+	if was_playback_source:
+		settings.music_mode = "single"
+		settings.music_shuffle_source = "library"
+	_commit_music_settings()
+	return {"ok": true, "name": name, "message": "Deleted: %s" % name}
+
+
+func cmd_playlist_play(playlist_id: String) -> Dictionary:
+	## Play In Order: makes the playlist active and plays gameplay music
+	## from its first entry (continuing the current track when the edit
+	## kept it in the list), wrapping in order.
+	var playlist := settings.find_playlist(playlist_id)
+	if playlist.is_empty():
+		return {"ok": false, "message": "Playlist no longer exists"}
+	if (playlist["tracks"] as Array).is_empty():
+		return {"ok": false, "message": "Playlist is empty - add tracks first"}
+	settings.set_active_playlist(playlist_id)
+	settings.music_mode = "playlist"
+	_commit_music_settings()
+	_audio.play_playlist_first_entry()
+	return {"ok": true, "message": "Playing in order: %s" % settings.playlist_name(playlist_id)}
+
+
+func cmd_playlist_shuffle(playlist_id: String) -> Dictionary:
+	## Shuffle Playlist: makes the playlist active and shuffles gameplay
+	## music from its tracks only.
+	var playlist := settings.find_playlist(playlist_id)
+	if playlist.is_empty():
+		return {"ok": false, "message": "Playlist no longer exists"}
+	if (playlist["tracks"] as Array).is_empty():
+		return {"ok": false, "message": "Playlist is empty - add tracks first"}
+	settings.set_active_playlist(playlist_id)
+	settings.music_mode = "shuffle"
+	settings.music_shuffle_source = "playlist"
+	_commit_music_settings()
+	return {"ok": true, "message": "Shuffling: %s" % settings.playlist_name(playlist_id)}
+
+
+func cmd_music_play_track(track_id: String) -> Dictionary:
+	## Manager library action: one song becomes the selected track and
+	## plays immediately as Single.
+	if not _audio.has_track(track_id):
+		return {"ok": false, "message": "Track no longer exists"}
+	settings.music_track = track_id
+	settings.music_mode = "single"
+	_commit_music_settings()
+	var title: String = _audio.track_title(track_id)
+	return {"ok": true, "message": "Playing: %s" % (title if not title.is_empty() else track_id.get_file())}
+
+
+func cmd_music_skip() -> Dictionary:
+	## F1: advance the current playback one track. UI feedback plays on
+	## success and the visible settings summary refreshes either way.
+	if _audio == null:
+		return {"ok": false, "message": "Nothing to skip"}
+	var result: Dictionary = _audio.skip_current_track()
+	var message := ""
+	if bool(result.get("ok", false)):
+		var track_id: String = _audio.current_track_id()
+		var title: String = _audio.track_title(track_id)
+		message = "Skipped: %s" % (title if not title.is_empty() else track_id.get_file())
+		play_ui_sfx("menu_confirm")
+	else:
+		message = _music_skip_blocked_message(String(result.get("reason", "")))
+	if _settings_screen != null:
+		_settings_screen.on_music_skipped(message)
+	return {"ok": bool(result.get("ok", false)), "message": message}
+
+
+static func _music_skip_blocked_message(reason: String) -> String:
+	match reason:
+		"off":
+			return "Music is off"
+		"preview":
+			return "Stop the preview first"
+		"inactive":
+			return "Nothing to skip"
+	return "Nothing to skip"
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# F1 is a fixed, non-rebindable music skip: raw and global (menu,
+	# gameplay, pause, settings, results), never an InputMap action. The
+	# host is the last unhandled handler, so an owning overlay (the
+	# on-screen keyboard or a binding capture) consumes the key before it
+	# ever arrives here; the guards below keep that contract explicit.
+	if _audio == null or settings == null:
+		return
+	if not (event is InputEventKey):
+		return
+	var key := event as InputEventKey
+	if key.physical_keycode != KEY_F1 or not key.pressed or key.is_echo():
+		return
+	if _osk != null and _osk.is_open():
+		return
+	if _settings_screen != null and _settings_screen.owns_raw_input():
+		return
+	get_viewport().set_input_as_handled()
+	cmd_music_skip()
+
+
+# Read-only playlist/audio accessors for the settings screen rows.
+
+func playlists() -> Array:
+	## Safe copies of every playlist record ({id, name, tracks}).
+	var out: Array = []
+	if settings == null:
+		return out
+	for playlist in settings.music_playlists:
+		out.append({
+			"id": playlist["id"],
+			"name": playlist["name"],
+			"tracks": (playlist["tracks"] as Array).duplicate(),
+		})
+	return out
+
+
+func playlist_exists(playlist_id: String) -> bool:
+	return settings != null and not settings.find_playlist(playlist_id).is_empty()
+
+
+func playlist_name(playlist_id: String) -> String:
+	return settings.playlist_name(playlist_id) if settings != null else ""
+
+
+func playlist_tracks(playlist_id: String) -> Array:
+	return settings.playlist_tracks(playlist_id) if settings != null else []
+
+
+func playlist_name_taken(name: String, exclude_id: String = "") -> bool:
+	return settings.playlist_name_taken(name, exclude_id) if settings != null else false
+
+
+func active_playlist_id() -> String:
+	return settings.active_music_playlist_id if settings != null else ""
+
+
+func music_now_playing_summary() -> String:
+	## Concise current-playback line for the Audio category and the
+	## playlist manager: Off, No track, or the track title with its
+	## playback mode, plus the active playlist when it drives playback.
+	if _audio == null:
+		return "Now Playing: Off"
+	var track_id: String = _audio.current_track_id()
+	var mode: String = _audio.playback_mode()
+	if track_id.is_empty():
+		return "Now Playing: Off" if mode == "off" else "Now Playing: No track"
+	var title: String = _audio.track_title(track_id)
+	if title.is_empty():
+		title = track_id.get_file()
+	var mode_label := String({"off": "Off", "single": "Single", "playlist": "Playlist", "shuffle": "Shuffle"}.get(mode, mode))
+	var text := "Now Playing: %s (%s)" % [title, mode_label]
+	if mode == "playlist" or (mode == "shuffle" and settings.music_shuffle_source == "playlist"):
+		var playlist_label := settings.active_playlist_name()
+		if not playlist_label.is_empty():
+			text += " - Active playlist: %s" % playlist_label
+	return text
 
 
 # Read-only audio accessors for the settings screen rows.
@@ -1496,6 +1720,10 @@ func audio_music_dir_hint() -> String:
 
 func music_previewing() -> bool:
 	return _audio != null and _audio.previewing()
+
+
+func music_current_track_id() -> String:
+	return _audio.current_track_id() if _audio != null else ""
 
 
 # Normalization state for the settings screen's audio rows. Read-only; all

@@ -40,6 +40,7 @@ func setup() -> void:
 		_host._coop_setup._ready()
 		_host._profile_screen._ready()
 		_host._osk._ready()
+		_host._online_menu._ready()
 		_host._show_main_menu()
 
 
@@ -1067,6 +1068,7 @@ func test_theme_change_updates_all_presentation_nodes() -> void:
 	check_eq(_host._menu._tokens["menu.scrim"], new_tokens["menu.scrim"], "menu updated")
 	check_eq(_host._hud._tokens["theme.text"], new_tokens["theme.text"], "hud updated")
 	check_eq(_host._settings_screen._tokens["theme.accent"], new_tokens["theme.accent"], "settings screen updated")
+	check_eq(_host._online_menu._tokens["menu.scrim"], new_tokens["menu.scrim"], "online menu updated")
 	check_eq(_host._board_renderer._tokens["board.bg"], new_tokens["board.bg"], "board renderer updated")
 	check_eq(_host._hold_renderer._piece_colors["i"], new_tokens["pieces.i"], "hold mini updated")
 	check_eq(_host._previews[0]._piece_colors["o"], new_tokens["pieces.o"], "preview mini updated")
@@ -1092,6 +1094,30 @@ func test_theme_refresh_updates_cinematic_menu_controls() -> void:
 			continue
 		check_eq(menu._labels[i].get_theme_color("font_color"), tokens["theme.dim"], "unselected label uses theme.dim")
 		check_eq(menu._row_styles[i].bg_color.a, 0.0, "unselected row background stays transparent")
+
+
+func test_theme_refresh_updates_online_menu_controls() -> void:
+	_host.cmd_return_to_menu()
+	_host._online_menu.open_entry()
+	_host.cmd_theme_selected("builtin:retro_crt")
+	var tokens: Dictionary = _host.themes.tokens()
+	var menu: CanvasLayer = _host._online_menu
+	check_eq(menu._bg.color, tokens["menu.scrim"], "online scrim follows the theme")
+	check_eq(menu._title.get_theme_color("font_color"), tokens["theme.text"], "online title follows theme.text")
+	check_eq(menu._title.get_theme_font_size("font_size"), tokens["menu.title_size"], "online title size follows the theme")
+	check_eq(menu._status.get_theme_font_size("font_size"), tokens["menu.detail_size"], "online status size follows the theme")
+	check_eq(menu._items_box.get_theme_constant("separation"), tokens["menu.spacing"], "online row spacing follows the theme")
+	var sel: int = menu._selected
+	check_eq(menu._row_styles[sel].bg_color, tokens["menu.panel"], "online selected row uses menu.panel")
+	check_eq(menu._row_styles[sel].border_color, tokens["menu.divider"], "online selected row uses menu.divider")
+	check_eq(menu._labels[sel].get_theme_color("font_color"), tokens["menu.focus"], "online selection uses menu.focus")
+	check_eq(menu._code_edit.get_theme_color("font_color"), tokens["theme.text"], "room code text follows theme.text")
+	check_eq(menu._code_edit.get_theme_color("font_placeholder_color"), tokens["theme.dim"], "room code placeholder follows theme.dim")
+	check_eq(menu._code_edit.get_theme_color("caret_color"), tokens["menu.focus"], "room code caret follows menu.focus")
+	var code_style: StyleBoxFlat = menu._code_edit.get_theme_stylebox("normal")
+	check_eq(code_style.bg_color, tokens["menu.panel"], "room code background follows menu.panel")
+	check_eq(code_style.border_color, tokens["menu.divider"], "room code border follows menu.divider")
+	menu.close()
 
 
 func test_theme_switch_preserves_menu_rows_and_selection() -> void:
@@ -1284,6 +1310,9 @@ func test_theme_fonts_propagate_to_labels() -> void:
 	check_true(_host._hud._score_label.has_theme_font_override("font"), "hud stat values use the body font")
 	check_true(_host._settings_screen._title.has_theme_font_override("font"), "settings heading uses the title font")
 	check_true(_host._coop_setup._title.has_theme_font_override("font"), "coop setup heading uses the title font")
+	check_true(_host._online_menu._title.has_theme_font_override("font"), "online heading uses the title font")
+	check_true(_host._online_menu._status.has_theme_font_override("font"), "online status uses the body font")
+	check_true(_host._online_menu._code_edit.has_theme_font_override("font"), "online room code uses the body font")
 	for label in _host._title_labels:
 		check_true(label.has_theme_font_override("font"), "hold/next labels use the body font")
 
@@ -1299,6 +1328,8 @@ func test_theme_fonts_propagate_to_labels() -> void:
 	check_false(_host._hud._score_label.has_theme_font_override("font"), "hud override removed")
 	check_false(_host._settings_screen._title.has_theme_font_override("font"), "settings override removed")
 	check_false(_host._coop_tags[0].has_theme_font_override("font"), "coop tag override removed")
+	check_false(_host._online_menu._title.has_theme_font_override("font"), "online title override removed")
+	check_false(_host._online_menu._code_edit.has_theme_font_override("font"), "online room code override removed")
 	_host.cmd_return_to_menu()
 
 

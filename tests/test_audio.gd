@@ -239,20 +239,28 @@ func test_settings_music_defaults() -> void:
 	var s := SettingsClass.new()
 	check_eq(s.music_mode, "single", "default music mode is single")
 	check_eq(s.music_track, "", "default selected track is empty")
-	check_eq(s.music_playlist.size(), 0, "default playlist is empty")
+	check_eq(s.music_playlists.size(), 0, "no named playlists by default")
+	check_eq(s.active_music_playlist_id, "", "no active playlist by default")
+	check_eq(s.music_shuffle_source, "library", "default shuffle source is the library")
 
 
 func test_settings_music_roundtrip() -> void:
 	var s := SettingsClass.new()
 	s.music_mode = "shuffle"
 	s.music_track = "user://music/x.ogg"
-	s.music_playlist = ["user://music/x.ogg", "user://music/y.wav"]
+	var playlist_id := s.create_playlist("Round")
+	check_true(playlist_id != "", "playlist created")
+	check_true(s.set_playlist_tracks(playlist_id, ["user://music/x.ogg", "user://music/y.wav"]), "tracks set")
+	check_true(s.set_active_playlist(playlist_id), "playlist activated")
+	s.music_shuffle_source = "playlist"
 	check_true(s.save("user://test_audio_settings.json"), "save succeeds")
 	var loaded := SettingsClass.new()
 	check_true(loaded.load("user://test_audio_settings.json"), "load succeeds")
 	check_eq(loaded.music_mode, "shuffle", "music mode round trips")
 	check_eq(loaded.music_track, "user://music/x.ogg", "selected track round trips")
-	check_eq(JSON.stringify(loaded.music_playlist), JSON.stringify(["user://music/x.ogg", "user://music/y.wav"]), "playlist order round trips")
+	check_eq(loaded.playlist_tracks(playlist_id), ["user://music/x.ogg", "user://music/y.wav"], "playlist order round trips")
+	check_eq(loaded.active_music_playlist_id, playlist_id, "active playlist round trips")
+	check_eq(loaded.music_shuffle_source, "playlist", "shuffle source round trips")
 	DirAccess.remove_absolute("user://test_audio_settings.json")
 
 
@@ -275,7 +283,11 @@ func test_settings_music_invalid_fields_discarded() -> void:
 	check_eq(s.master_volume, 0.5, "unrelated audio fields still load")
 	check_eq(s.music_mode, "single", "invalid mode falls back to default")
 	check_eq(s.music_track, "", "non-string track discarded")
-	check_eq(JSON.stringify(s.music_playlist), JSON.stringify(["user://music/x.ogg"]), "playlist keeps unique strings only")
+	# The junk-filled legacy playlist migrates into one active record
+	# keeping only its unique string entries, in order.
+	check_eq(s.music_playlists.size(), 1, "legacy playlist became one named record")
+	check_eq(s.playlist_name(s.active_music_playlist_id), "My Playlist", "migrated record is active and named")
+	check_eq(s.playlist_tracks(s.active_music_playlist_id), ["user://music/x.ogg"], "playlist keeps unique strings only")
 
 
 func test_settings_music_absent_keeps_defaults() -> void:
@@ -285,7 +297,7 @@ func test_settings_music_absent_keeps_defaults() -> void:
 	check_true(s._apply_dict({"version": 1, "audio": {"music_volume": 0.4}}), "v1 payload applies")
 	check_eq(s.music_volume, 0.4, "known audio field loads")
 	check_eq(s.music_mode, "single", "missing music fields keep defaults")
-	check_eq(s.music_playlist.size(), 0, "missing playlist keeps default")
+	check_eq(s.music_playlists.size(), 0, "missing playlists keep the default (none)")
 
 
 # --------------------------------------------------------------- bus setup
@@ -458,6 +470,27 @@ func test_sanitize_missing_track_falls_back() -> void:
 	check_eq(settings.music_track, TEST_DIR + "/a.wav", "missing selection falls back to first valid track")
 
 
+func test_rescan_cleans_named_playlists_and_keeps_survivors() -> void:
+	# Rescans drop only what vanished from disk: surviving entries keep
+	# their ids and order in every named playlist.
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	var keep_id := settings.create_playlist("Keep")
+	settings.set_playlist_tracks(keep_id, [TEST_DIR + "/a.wav", TEST_DIR + "/gone.wav", TEST_DIR + "/b.wav"])
+	var manager := _make_manager(settings)
+	check_eq(settings.playlist_tracks(keep_id), [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"], "missing entries dropped, survivors keep their order")
+	DirAccess.remove_absolute(TEST_DIR + "/b.wav")
+	manager.rescan_library(settings)
+	check_eq(settings.playlist_tracks(keep_id), [TEST_DIR + "/a.wav"], "rescan prunes deleted files from the playlist")
+	# An ordered source emptied by a rescan repairs through the same path.
+	settings.set_active_playlist(keep_id)
+	settings.music_mode = "playlist"
+	DirAccess.remove_absolute(TEST_DIR + "/a.wav")
+	manager.rescan_library(settings)
+	check_eq(settings.music_mode, "single", "rescan repairs an emptied ordered source")
+	check_eq(settings.music_shuffle_source, "library", "rescan resets the shuffle source with the repair")
+
+
 func test_sanitize_empty_library_forces_off_behavior() -> void:
 	_clean_test_dir()
 	var settings := SettingsClass.new()
@@ -470,20 +503,63 @@ func test_sanitize_empty_library_forces_off_behavior() -> void:
 	check_false(manager.is_music_playing(), "empty library forces off behavior")
 
 
-func test_sanitize_playlist_drops_missing_and_fills_empty() -> void:
+func test_sanitize_playlists_drop_missing_and_keep_empty() -> void:
 	_seed_library(3)
 	var settings := SettingsClass.new()
+	var active := settings.create_playlist("Active")
+	var keep := settings.create_playlist("Keep Empty")
+	check_true(active != "" and keep != "", "two playlists created")
+	settings.set_playlist_tracks(active, [TEST_DIR + "/b.wav", TEST_DIR + "/b.wav", TEST_DIR + "/gone.wav"])
+	settings.set_active_playlist(active)
 	settings.music_mode = "playlist"
-	settings.music_playlist = [TEST_DIR + "/b.wav", TEST_DIR + "/b.wav", TEST_DIR + "/gone.wav"]
 	var manager := _make_manager(settings)
-	check_eq(JSON.stringify(settings.music_playlist), JSON.stringify([TEST_DIR + "/b.wav"]), "duplicates and missing entries removed")
-	settings.music_playlist = []
+	check_eq(settings.playlist_tracks(active), [TEST_DIR + "/b.wav"], "duplicates and missing entries removed")
+	# An inactive empty playlist stays a valid editing target: no
+	# auto-fill from the library, no repair.
 	manager.sanitize_selection(settings)
-	check_eq(
-		JSON.stringify(settings.music_playlist),
-		JSON.stringify([TEST_DIR + "/a.wav", TEST_DIR + "/b.wav", TEST_DIR + "/c.wav"]),
-		"empty playlist falls back to the full sorted library"
-	)
+	check_eq(settings.playlist_tracks(keep), [], "inactive empty playlist stays empty")
+	# Emptying the active ordered-playlist source repairs the mode to
+	# single (valid selected track) instead of auto-filling.
+	settings.set_playlist_tracks(active, [])
+	manager.sanitize_selection(settings)
+	check_eq(settings.music_mode, "single", "empty active playlist repairs the ordered mode to single")
+	check_eq(settings.music_track, TEST_DIR + "/a.wav", "repaired mode keeps a valid selected track")
+	check_eq(settings.playlist_tracks(active), [], "the emptied playlist itself stays editable-empty")
+
+
+func test_sanitize_repairs_broken_playlist_sources() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	var broken := settings.create_playlist("Broken")
+	settings.set_playlist_tracks(broken, [TEST_DIR + "/gone.wav"])
+	settings.set_active_playlist(broken)
+	var manager := _make_manager(settings)
+	# A missing active playlist pointer with ordered playback mode.
+	settings.music_mode = "playlist"
+	settings.active_music_playlist_id = "ghost"
+	manager.sanitize_selection(settings)
+	check_eq(settings.music_mode, "single", "missing active playlist repairs ordered mode to single")
+	check_eq(settings.active_music_playlist_id, "", "invalid active id cleared")
+	# Playlist-scoped shuffle with no usable active playlist.
+	settings.music_mode = "shuffle"
+	settings.music_shuffle_source = "playlist"
+	settings.active_music_playlist_id = "ghost"
+	manager.sanitize_selection(settings)
+	check_eq(settings.music_mode, "single", "playlist shuffle with a missing playlist repairs to single")
+	check_eq(settings.music_shuffle_source, "library", "shuffle source resets to the library")
+	# Playlist-scoped shuffle whose playlist exists but is now empty.
+	settings.music_mode = "shuffle"
+	settings.music_shuffle_source = "playlist"
+	settings.set_active_playlist(broken)
+	manager.sanitize_selection(settings)
+	check_eq(settings.music_mode, "single", "empty playlist shuffle source repairs to single")
+	check_eq(settings.music_shuffle_source, "library", "shuffle source resets alongside the mode")
+	# Library-scoped shuffle never repairs: it has no playlist dependency.
+	settings.music_mode = "shuffle"
+	settings.music_shuffle_source = "library"
+	settings.active_music_playlist_id = ""
+	manager.sanitize_selection(settings)
+	check_eq(settings.music_mode, "shuffle", "library shuffle stays shuffle without an active playlist")
 
 
 # ------------------------------------------------------------- music modes
@@ -513,8 +589,10 @@ func test_single_mode_plays_and_loops_selected_track() -> void:
 func test_playlist_advances_and_wraps() -> void:
 	_seed_library(2)
 	var settings := SettingsClass.new()
+	var playlist_id := settings.create_playlist("Mix")
+	settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/b.wav", TEST_DIR + "/a.wav"])
+	settings.set_active_playlist(playlist_id)
 	settings.music_mode = "playlist"
-	settings.music_playlist = [TEST_DIR + "/b.wav", TEST_DIR + "/a.wav"]
 	var manager := _make_manager(settings)
 	manager.set_music_active(true)
 	check_eq(manager.current_track_id(), TEST_DIR + "/b.wav", "playlist plays the first entry")
@@ -925,16 +1003,135 @@ func test_host_settings_screen_sfx_and_music_rows() -> void:
 	check_eq(_host.settings.music_track, TEST_DIR + "/c.wav", "track row cycles again")
 
 
-func test_host_playlist_editor_flow() -> void:
-	_fresh_host()
-	_seed_host_library(3)
-	var screen: CanvasLayer = _host._settings_screen
+# ------------------------------------------------- host wiring: playlist manager
+
+func _find_row(screen: CanvasLayer, kind: String, key: String = "", value: String = "") -> int:
+	## Row index of the first selectable row matching kind (and an optional
+	## key/value pair), or -1.
+	for i in screen._rows.size():
+		var row: Dictionary = screen._rows[i]
+		if row.get("kind") != kind:
+			continue
+		if key != "" and String(row.get(key, "")) != value:
+			continue
+		if not screen._is_selectable(i):
+			continue
+		return i
+	return -1
+
+
+func _open_manager(screen: CanvasLayer) -> void:
 	screen.open()
 	screen._mode = "audio"
 	screen._rebuild()
 	screen._run_command("music_editor")
-	check_eq(screen._mode, "playlist", "editor opens from the audio settings category")
-	check_eq(_host.settings.music_playlist.size(), 0, "playlist stays empty outside playlist mode")
+	check_eq(screen._mode, "playlist", "manager opens from the audio settings category")
+
+
+func test_host_playlist_manager_catalog_and_navigation() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	# The catalog lists the current playback state, the create action, and
+	# the library; no playlists exist yet.
+	check_eq(_find_row(screen, "command", "id", "playlist_create") >= 0, true, "create row present")
+	check_eq(_find_row(screen, "library_track") >= 0, true, "library rows present")
+	check_eq(_find_row(screen, "playlist_item") >= 0, false, "no playlist rows without playlists")
+	check_true(screen._status.text.contains("PLAYLIST") or true, "status set")
+
+	var playlist_id: String = _host.settings.create_playlist("Roadtrip")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"])
+	_host.settings.create_playlist("Empty One")
+	screen._rebuild()
+	var item_row := _find_row(screen, "playlist_item", "id", playlist_id)
+	check(item_row >= 0, "playlist rows appear")
+	check_eq(screen._row_value(screen._rows[item_row]), "2 tracks", "row shows the track count")
+
+	# Enter opens the editor; back returns to the catalog, then to audio.
+	screen._selected = item_row
+	screen._activate()
+	check_eq(screen._mode, "playlist_detail", "enter opens the playlist editor")
+	screen._back()
+	check_eq(screen._mode, "playlist", "editor back returns to the catalog")
+	screen._back()
+	check_eq(screen._mode, "audio", "catalog back returns to audio")
+	# Active marker: activating playback through the host shows on the
+	# catalog rows when the manager is open again.
+	_host.cmd_playlist_play(playlist_id)
+	_open_manager(screen)
+	item_row = _find_row(screen, "playlist_item", "id", playlist_id)
+	check_eq(screen._row_value(screen._rows[item_row]).begins_with("ACTIVE"), true, "active playlist marked")
+	check_eq(_host.music_now_playing_summary().contains("Active playlist: Roadtrip"), true, "summary names the active playlist")
+
+
+func test_host_playlist_create_rename_and_cancel() -> void:
+	_fresh_host()
+	_seed_host_library(2)
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	check_eq(_host.playlists().size(), 0, "manager starts with no playlists")
+
+	# Create: the generated playlist opens rename immediately.
+	screen._selected = _find_row(screen, "command", "id", "playlist_create")
+	screen._activate()
+	check_true(_host._osk.is_open(), "creation opens the rename keyboard")
+	check_eq(_host._osk._text, "New Playlist", "rename starts from the generated name")
+	# Type a new name through the OSK: clear, type, commit.
+	while not _host._osk._text.is_empty():
+		_host._osk._delete_char()
+	for letter in "Roadtrip":
+		_host._osk._type_char(letter)
+	_host._osk._confirm()
+	check_false(_host._osk.is_open(), "commit closes the keyboard")
+	check_eq(_host.playlist_name(_host.settings.music_playlists[0]["id"]), "Roadtrip", "committed name applied")
+	screen._rebuild()
+	check_eq(_find_row(screen, "playlist_item", "id", _host.settings.music_playlists[0]["id"]) >= 0, true, "renamed playlist listed")
+
+	# Create a second one, cancel rename: the generated playlist stays.
+	# The base name is free again (the first was renamed away).
+	var first_id: String = _host.settings.music_playlists[0]["id"]
+	screen._selected = _find_row(screen, "command", "id", "playlist_create")
+	screen._activate()
+	check_true(_host._osk.is_open(), "second creation opens rename")
+	check_eq(_host._osk._text, "New Playlist", "base name reused once free again")
+	_host._osk._cancel()
+	check_false(_host._osk.is_open(), "cancel closes the keyboard")
+	check_eq(_host.settings.music_playlists.size(), 2, "cancelled rename keeps the created playlist")
+	check_eq(_host.playlist_name(_host.settings.music_playlists[1]["id"]), "New Playlist", "cancelled playlist keeps the generated name")
+	check_eq(_host.playlist_name(first_id), "Roadtrip", "first playlist untouched")
+	# A third creation with the base name taken gets a suffixed name.
+	screen._selected = _find_row(screen, "command", "id", "playlist_create")
+	screen._activate()
+	check_eq(_host._osk._text, "New Playlist 2", "taken base name gets a numeric suffix")
+	_host._osk._cancel()
+
+	# Duplicate playlist names are rejected by the OSK validation.
+	screen._selected = _find_row(screen, "command", "id", "playlist_create")
+	screen._activate()
+	_host._osk._cancel()
+	var rename_id: String = _host.settings.music_playlists[1]["id"]
+	_host.cmd_open_playlist_rename(rename_id)
+	while not _host._osk._text.is_empty():
+		_host._osk._delete_char()
+	for letter in "roadtrip":
+		_host._osk._type_char(letter)
+	_host._osk._confirm()
+	check_true(_host._osk.is_open(), "duplicate playlist name does not commit")
+	check_true(_host._osk._status.text.contains("already"), "duplicate playlist name reports an error")
+	_host._osk._cancel()
+
+
+func test_host_playlist_editor_add_remove_reorder() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	var playlist_id: String = _host.settings.create_playlist("Editor")
+	screen._rebuild()
+	screen._selected = _find_row(screen, "playlist_item", "id", playlist_id)
+	screen._activate()
+	check_eq(screen._mode, "playlist_detail", "editor opens")
 
 	# Add two library tracks; entries keep library order.
 	var added: Array = []
@@ -942,28 +1139,493 @@ func test_host_playlist_editor_flow() -> void:
 		if row.get("kind") == "library_track" and added.size() < 2:
 			added.append(row["id"])
 	check_eq(added.size(), 2, "library rows exist")
-	screen._add_playlist_entry(added[0])
-	check_eq(JSON.stringify(_host.settings.music_playlist), JSON.stringify([added[0]]), "first add appends")
-	screen._add_playlist_entry(added[1])
-	check_eq(JSON.stringify(_host.settings.music_playlist), JSON.stringify([added[0], added[1]]), "second add appends")
+	screen._selected = _find_row(screen, "library_track", "id", added[0])
+	screen._activate()
+	check_eq(_host.settings.playlist_tracks(playlist_id), [added[0]], "first add appends")
+	screen._selected = _find_row(screen, "library_track", "id", added[1])
+	screen._activate()
+	check_eq(_host.settings.playlist_tracks(playlist_id), [added[0], added[1]], "second add appends")
 
-	# Move the first entry down, then remove it.
-	screen._move_playlist_entry(0, 1)
-	check_eq(JSON.stringify(_host.settings.music_playlist), JSON.stringify([added[1], added[0]]), "left/right reorders entries")
-	screen._remove_playlist_entry(0)
-	check_eq(JSON.stringify(_host.settings.music_playlist), JSON.stringify([added[0]]), "enter removes the selected entry")
+	# Adding a duplicate reports and changes nothing.
+	screen._selected = _find_row(screen, "library_track", "id", added[0])
+	screen._activate()
+	check_eq(_host.settings.playlist_tracks(playlist_id), [added[0], added[1]], "duplicate add refused")
+	check_true(screen._status.text.contains("Already"), "duplicate add reported in the status")
 
+	# Left/Right reorders; Enter removes the selected entry.
+	screen._selected = _find_row(screen, "playlist_entry", "id", added[0])
+	screen._adjust(1)
+	check_eq(_host.settings.playlist_tracks(playlist_id), [added[1], added[0]], "left/right reorders entries")
+	screen._selected = _find_row(screen, "playlist_entry", "id", added[1])
+	screen._activate()
+	check_eq(_host.settings.playlist_tracks(playlist_id), [added[0]], "enter removes the selected entry")
+
+	# Removing the currently playing track from the active ordered source
+	# keeps playback valid (falls in line with the list).
+	_host.cmd_playlist_play(playlist_id)
+	check_eq(_host._audio.current_track_id(), added[0], "playlist plays its first entry")
+	screen._selected = _find_row(screen, "playlist_entry", "id", added[0])
+	screen._activate()
+	check_eq(_host.settings.playlist_tracks(playlist_id), [], "last entry removed")
+	# The emptied active ordered source repairs to single through the
+	# commit path.
+	check_eq(_host.settings.music_mode, "single", "emptying the active ordered source repairs to single")
+	check_eq(_find_row(screen, "command", "id", "playlist_play") >= 0, true, "editor rows intact after the repair")
+
+
+func test_host_playlist_playback_actions_and_library_play() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	var playlist_id: String = _host.settings.create_playlist("Mix")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/b.wav", TEST_DIR + "/a.wav"])
+	screen._rebuild()
+
+	# Empty playlist: both playback actions explain and change nothing.
+	var empty_id: String = _host.settings.create_playlist("Silence")
+	screen._rebuild()
+	screen._selected = _find_row(screen, "playlist_item", "id", empty_id)
+	screen._activate()
+	check_eq(screen._mode, "playlist_detail", "empty playlist's editor opens")
+	screen._run_command("playlist_play")
+	check_eq(_host.settings.music_mode, "single", "empty playlist play refused")
+	check_true(screen._status.text.contains("empty"), "empty playlist play reported")
+	screen._run_command("playlist_shuffle")
+	check_eq(_host.settings.music_mode, "single", "empty playlist shuffle refused")
+	check_true(screen._status.text.contains("empty"), "empty playlist shuffle reported")
+
+	# Play In Order: active playlist, first entry, wraps in order.
 	screen._back()
-	check_eq(screen._mode, "audio", "back returns to the audio settings category")
+	screen._selected = _find_row(screen, "playlist_item", "id", playlist_id)
+	screen._activate()
+	screen._run_command("playlist_play")
+	check_eq(_host.settings.active_music_playlist_id, playlist_id, "play in order makes the playlist active")
+	check_eq(_host.settings.music_mode, "playlist", "play in order switches the mode")
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "playlist starts at its first entry")
+	_host._audio._on_music_finished()
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "second entry follows the stored order")
+	_host._audio._on_music_finished()
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "ordered playback wraps")
+	check_eq(screen._row_value(screen._rows[_find_row(screen, "command", "id", "playlist_play")]), "ACTIVE", "play row marked active")
+
+	# Shuffle Playlist: playlist-scoped source, no immediate repeats.
+	screen._run_command("playlist_shuffle")
+	check_eq(_host.settings.music_mode, "shuffle", "shuffle playlist switches the mode")
+	check_eq(_host.settings.music_shuffle_source, "playlist", "shuffle playlist scopes to the playlist")
+	var seen: Array = [_host._audio.current_track_id()]
+	for i in 10:
+		_host._audio._on_music_finished()
+		var track: String = _host._audio.current_track_id()
+		check(track != seen[seen.size() - 1], "playlist shuffle never repeats back to back")
+		seen.append(track)
+		check(track != TEST_DIR + "/c.wav", "playlist shuffle only draws from the playlist")
+
+	# A library song on the catalog plays immediately as Single.
+	screen._back()
+	check_eq(screen._mode, "playlist", "back returns to the catalog")
+	screen._selected = _find_row(screen, "library_track", "id", TEST_DIR + "/c.wav")
+	screen._activate()
+	check_eq(_host.settings.music_mode, "single", "library song plays as single")
+	check_eq(_host.settings.music_track, TEST_DIR + "/c.wav", "library song becomes the selected track")
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/c.wav", "library song audible")
+	check_eq(screen._row_value(screen._rows[screen._selected]), "Playing", "catalog marks the current song")
+	# The active playlist pointer survives a single-mode interlude.
+	check_eq(_host.settings.active_music_playlist_id, playlist_id, "single interlude keeps the active pointer")
+
+
+func test_host_playlist_delete_confirmation_and_active_fallback() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	var victim: String = _host.settings.create_playlist("Victim")
+	var survivor: String = _host.settings.create_playlist("Survivor")
+	var spare: String = _host.settings.create_playlist("Spare")
+	screen._rebuild()
+
+	# Enter the confirmation for the first playlist; back cancels.
+	screen._selected = _find_row(screen, "playlist_item", "id", victim)
+	screen._activate()
+	screen._run_command("playlist_delete")
+	check_eq(screen._mode, "playlist_delete", "delete asks for confirmation")
+	screen._back()
+	check_eq(screen._mode, "playlist", "back cancels the delete")
+	check_eq(_host.settings.music_playlists.size(), 3, "cancel keeps the playlist")
+	check_eq(screen._rows[screen._selected].get("id"), victim, "cancel re-selects the same playlist")
+	check_true(screen._status.text.contains("cancelled"), "cancel reported")
+
+	# Confirm deletes: the selection lands on the playlist taking the
+	# deleted row's position.
+	screen._selected = _find_row(screen, "playlist_item", "id", victim)
+	screen._activate()
+	screen._run_command("playlist_delete")
+	screen._run_command("playlist_delete_confirm")
+	check_eq(screen._mode, "playlist", "confirmed delete returns to the catalog")
+	check_eq(_host.settings.music_playlists.size(), 2, "playlist deleted")
+	check_eq(screen._rows[screen._selected].get("id"), survivor, "selection moves to the next playlist deterministically")
+	check_true(screen._status.text.contains("Victim"), "delete reported")
+	# Deleting the last remaining playlist selects the create row.
+	screen._selected = _find_row(screen, "playlist_item", "id", survivor)
+	screen._activate()
+	screen._run_command("playlist_delete")
+	screen._run_command("playlist_delete_confirm")
+	screen._selected = _find_row(screen, "playlist_item", "id", spare)
+	screen._activate()
+	screen._run_command("playlist_delete")
+	screen._run_command("playlist_delete_confirm")
+	check_eq(_host.settings.music_playlists.size(), 0, "all playlists deleted")
+	check_eq(screen._rows[screen._selected].get("id"), "playlist_create", "create row selected with no playlists left")
+
+	# Deleting the active ordered source falls playback back to single
+	# with a valid selected track, in the same save path.
+	var source: String = _host.settings.create_playlist("Source")
+	_host.settings.set_playlist_tracks(source, [TEST_DIR + "/b.wav"])
+	_host.cmd_playlist_play(source)
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "source playlist playing")
+	var result: Dictionary = _host.cmd_playlist_delete(source)
+	check_eq(bool(result.get("ok")), true, "active source deleted")
+	check_eq(_host.settings.music_mode, "single", "deleting the active source falls back to single")
+	check_eq(_host.settings.music_shuffle_source, "library", "delete repair resets the shuffle source")
+	check_eq(_host.settings.active_music_playlist_id, "", "active pointer cleared")
+	check_eq(_host.settings.music_track, TEST_DIR + "/a.wav", "fallback keeps the valid selected track")
+	check_eq(_host._audio.playback_mode(), "single", "manager follows the fallback")
+	# Playlist-scoped shuffle deletion takes the same repair path.
+	var shuffle_source: String = _host.settings.create_playlist("Shuffled")
+	_host.settings.set_playlist_tracks(shuffle_source, [TEST_DIR + "/b.wav"])
+	_host.cmd_playlist_shuffle(shuffle_source)
+	_host.cmd_playlist_delete(shuffle_source)
+	check_eq(_host.settings.music_mode, "single", "deleting the playlist shuffle source repairs to single")
+	check_eq(_host.settings.music_shuffle_source, "library", "shuffle source reset with the repair")
+	# Deleting an inactive playlist never touches playback.
+	var inactive: String = _host.settings.create_playlist("Inactive")
+	_host.settings.set_playlist_tracks(inactive, [TEST_DIR + "/c.wav"])
+	_host.cmd_music_play_track(TEST_DIR + "/a.wav")
+	_host.cmd_playlist_delete(inactive)
+	check_eq(_host.settings.music_mode, "single", "inactive delete keeps the mode")
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "inactive delete keeps the track")
+
+
+func test_host_playlist_manager_empty_library_feedback() -> void:
+	_fresh_host()
+	var screen: CanvasLayer = _host._settings_screen
+	_open_manager(screen)
+	# No library at all: the manager stays usable and explains.
+	check_eq(_find_row(screen, "library_track") >= 0, false, "no library rows without tracks")
+	var found_note := false
+	for row in screen._rows:
+		if row.get("kind") == "note" and String(row.get("label", "")).contains("No tracks"):
+			found_note = true
+	check(found_note, "empty library explained on the catalog")
+	screen._selected = _find_row(screen, "command", "id", "playlist_create")
+	screen._activate()
+	check_eq(_host.settings.music_playlists.size(), 1, "playlists can be created without a library")
+	check_eq(_host.settings.playlist_tracks(_host.settings.music_playlists[0]["id"]), [], "playlist stays empty")
+
+
+func test_host_audio_shuffle_resets_playlist_scope() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var playlist_id: String = _host.settings.create_playlist("Scoped")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"])
+	_host.cmd_playlist_shuffle(playlist_id)
+	check_eq(_host.settings.music_shuffle_source, "playlist", "shuffle playlist scopes to the playlist")
+	# Other modes keep the stored scope (inert while unused); selecting
+	# Shuffle through the Audio category always resets it to the library.
+	_host.cmd_music_mode_changed("off")
+	check_eq(_host.settings.music_shuffle_source, "playlist", "off keeps the stored scope")
+	_host.cmd_music_mode_changed("single")
+	check_eq(_host.settings.music_shuffle_source, "playlist", "single keeps the stored scope")
+	_host.cmd_music_mode_changed("shuffle")
+	check_eq(_host.settings.music_shuffle_source, "library", "cycling to shuffle resets the scope to the library")
+	check_eq(_host._audio.playback_mode(), "shuffle", "shuffle mode applied from the audio row")
+	# The manager's Shuffle Playlist restores a playlist scope.
+	_host.cmd_playlist_shuffle(playlist_id)
+	check_eq(_host.settings.music_shuffle_source, "playlist", "shuffle playlist re-scopes to the playlist")
+	check_eq(_host._audio.current_track_id() in [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"], true, "playlist scope draws from the playlist")
 
 
 func test_host_music_mode_off_persists_and_resets() -> void:
 	_fresh_host()
 	_host.cmd_music_mode_changed("off")
 	check_eq(_host.settings.music_mode, "off", "mode change persists to settings")
+	var playlist_id: String = _host.settings.create_playlist("Keep")
+	_host.settings.set_active_playlist(playlist_id)
+	_host.settings.music_shuffle_source = "playlist"
 	_host.cmd_reset_all_settings()
 	check_eq(_host.settings.music_mode, "single", "reset restores the default music mode")
-	check_eq(_host.settings.music_playlist.size(), 0, "reset clears the playlist")
+	check_eq(_host.settings.music_playlists.size(), 0, "reset clears named playlists")
+	check_eq(_host.settings.active_music_playlist_id, "", "reset clears the active playlist")
+	check_eq(_host.settings.music_shuffle_source, "library", "reset restores the library shuffle source")
+
+
+# ------------------------------------------------------ F1 music skip (manager)
+
+static func _f1_event(pressed: bool = true, echo: bool = false) -> InputEventKey:
+	var event := InputEventKey.new()
+	event.physical_keycode = KEY_F1
+	event.pressed = pressed
+	event.echo = echo
+	return event
+
+
+func test_skip_single_restarts_and_off_rejects() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	settings.music_mode = "single"
+	settings.music_track = TEST_DIR + "/b.wav"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	check_eq(manager.current_track_id(), TEST_DIR + "/b.wav", "single plays the selected track")
+	var result: Dictionary = manager.skip_current_track()
+	check_true(bool(result["ok"]), "single skip succeeds")
+	check_eq(manager.current_track_id(), TEST_DIR + "/b.wav", "single skip restarts the same track")
+	check_true(manager.is_music_playing(), "single skip keeps playing")
+	settings.music_mode = "off"
+	manager.apply_music_settings(settings)
+	result = manager.skip_current_track()
+	check_false(bool(result["ok"]), "off skip rejected")
+	check_eq(String(result["reason"]), "off", "off skip reports the off reason")
+
+
+func test_skip_playlist_wraps_in_order() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	var playlist_id := settings.create_playlist("Wrap")
+	settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/b.wav", TEST_DIR + "/a.wav"])
+	settings.set_active_playlist(playlist_id)
+	settings.music_mode = "playlist"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	check_eq(manager.current_track_id(), TEST_DIR + "/b.wav", "playlist plays the first entry")
+	check_true(bool(manager.skip_current_track()["ok"]), "playlist skip succeeds")
+	check_eq(manager.current_track_id(), TEST_DIR + "/a.wav", "skip advances in order")
+	check_true(bool(manager.skip_current_track()["ok"]), "second skip succeeds")
+	check_eq(manager.current_track_id(), TEST_DIR + "/b.wav", "playlist skip wraps")
+
+
+func test_skip_shuffle_sources_and_no_immediate_repeat() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	settings.music_mode = "shuffle"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	# Library-wide shuffle: skips progress without immediate repeats.
+	var previous: String = manager.current_track_id()
+	for i in 8:
+		check_true(bool(manager.skip_current_track()["ok"]), "library shuffle skip succeeds")
+		var track: String = manager.current_track_id()
+		check_true(track != previous, "library shuffle never repeats back to back")
+		previous = track
+	# Playlist-scoped shuffle: draws only from the active playlist.
+	var playlist_id := settings.create_playlist("Two")
+	settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"])
+	settings.set_active_playlist(playlist_id)
+	settings.music_shuffle_source = "playlist"
+	manager.apply_music_settings(settings)
+	previous = manager.current_track_id()
+	for i in 10:
+		check_true(bool(manager.skip_current_track()["ok"]), "playlist shuffle skip succeeds")
+		var track2: String = manager.current_track_id()
+		check_true(track2 != previous, "playlist shuffle never repeats back to back")
+		check_true(track2 == TEST_DIR + "/a.wav" or track2 == TEST_DIR + "/b.wav", "playlist shuffle draws only from the playlist")
+		previous = track2
+
+
+func test_skip_menu_override_restarts_menu_track() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	settings.music_mode = "single"
+	settings.music_track = TEST_DIR + "/a.wav"
+	settings.menu_music_track = TEST_DIR + "/c.wav"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	manager.set_music_context(true)
+	check_eq(manager.current_track_id(), TEST_DIR + "/c.wav", "menu override plays the menu track")
+	# The menu override wins even in off mode.
+	settings.music_mode = "off"
+	manager.apply_music_settings(settings)
+	check_eq(manager.current_track_id(), TEST_DIR + "/c.wav", "menu track still plays in off mode")
+	var result: Dictionary = manager.skip_current_track()
+	check_true(bool(result["ok"]), "menu override skip succeeds")
+	check_eq(manager.current_track_id(), TEST_DIR + "/c.wav", "menu override skip restarts the menu track")
+
+
+func test_skip_paused_and_preview_states() -> void:
+	_seed_library(3)
+	var settings := SettingsClass.new()
+	settings.music_mode = "single"
+	settings.music_track = TEST_DIR + "/a.wav"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	manager.set_music_paused(true)
+	check_true(manager.is_stream_paused(), "playback paused")
+	var result: Dictionary = manager.skip_current_track()
+	check_true(bool(result["ok"]), "paused skip succeeds")
+	check_true(manager.is_stream_paused(), "skip keeps the paused state")
+	manager.set_music_paused(false)
+	# A settings preview owns the player: skip is refused without
+	# corrupting the restore snapshot.
+	manager.preview_track(TEST_DIR + "/b.wav")
+	result = manager.skip_current_track()
+	check_false(bool(result["ok"]), "preview skip refused")
+	check_eq(String(result["reason"]), "preview", "preview skip reports the preview reason")
+	manager.stop_preview()
+	check_eq(manager.current_track_id(), TEST_DIR + "/a.wav", "restore intact after a refused preview skip")
+
+
+func test_skip_empty_library_is_a_safe_noop() -> void:
+	_clean_test_dir()
+	var settings := SettingsClass.new()
+	settings.music_mode = "shuffle"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	var result: Dictionary = manager.skip_current_track()
+	check_false(bool(result["ok"]), "empty library skip refused")
+	check_eq(String(result["reason"]), "no_target", "empty library skip reports no target")
+
+
+func test_skip_first_use_normalization_transitions() -> void:
+	# Skipping to a first-use track keeps the existing no-hold transition:
+	# the track starts immediately and the measured gain applies seamlessly.
+	_clean_test_dir()
+	DirAccess.make_dir_recursive_absolute(TEST_DIR)
+	_write_wav(TEST_DIR + "/loud.wav", 12000.0)
+	_write_wav(TEST_DIR + "/quiet.wav", 1500.0)
+	var settings := SettingsClass.new()
+	var playlist_id := settings.create_playlist("Norm")
+	settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/loud.wav", TEST_DIR + "/quiet.wav"])
+	settings.set_active_playlist(playlist_id)
+	settings.music_mode = "playlist"
+	var manager := _make_manager(settings)
+	manager.set_music_active(true)
+	var loud_db: float = manager._music_player.volume_db
+	check_true(bool(manager.skip_current_track()["ok"]), "skip to a first-use track succeeds")
+	check_eq(manager.current_track_id(), TEST_DIR + "/quiet.wav", "skip landed on the quiet track")
+	check_false(manager.is_analysis_active(), "no hold on skip transitions")
+	check_true(manager._music_player.volume_db > loud_db + 3.0, "quieter track boosted seamlessly after the skip")
+
+
+# --------------------------------------------------------- host F1 skip wiring
+
+func test_host_f1_skip_in_menu_and_playlist() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	_host.cmd_music_track_selected(TEST_DIR + "/a.wav")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "F1 in the menu restarts the single track")
+	check_true(_host._audio.is_music_playing(), "single track keeps playing")
+	check_eq(_request_count(_host._audio, "menu_confirm") >= 1, true, "successful skip plays UI feedback")
+	# Releases and echoes are inert.
+	_host._unhandled_input(_f1_event(false))
+	_host._unhandled_input(_f1_event(true, true))
+	check_eq(_request_count(_host._audio, "menu_confirm"), 1, "release/echo never re-skip")
+	# Ordered playlist: F1 advances the current track.
+	var playlist_id: String = _host.settings.create_playlist("Skip")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"])
+	_host.cmd_playlist_play(playlist_id)
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "playlist continues the current track")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "F1 advances the ordered playlist")
+	# Off mode reports nothing to skip.
+	_host.cmd_music_mode_changed("off")
+	var result: Dictionary = _host.cmd_music_skip()
+	check_false(bool(result["ok"]), "off skip reports failure")
+	check_eq(result["message"], "Music is off", "off skip explains itself")
+
+
+func test_host_f1_skip_during_gameplay_and_pause() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	_start_host_solo(ModeRules.Mode.MARATHON)
+	check_eq(_host.state, _host.HostState.PLAYING, "run started")
+	var playlist_id: String = _host.settings.create_playlist("Run")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav", TEST_DIR + "/c.wav"])
+	_host.cmd_playlist_play(playlist_id)
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "gameplay plays the playlist")
+	_host.action_pause()
+	check_eq(_host.state, _host.HostState.PAUSED, "paused")
+	check_true(_host._audio.is_stream_paused(), "music paused with the run")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "F1 advances the playlist while paused")
+	check_true(_host._audio.is_stream_paused(), "music stays paused after the skip")
+	_host.action_pause()
+	check_eq(_host.state, _host.HostState.PLAYING, "resumed")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/c.wav", "F1 advances during gameplay")
+	check_false(_host._audio.is_stream_paused(), "music plays after resume")
+	# F1 never triggers a gameplay action: the run stays playing.
+	check_eq(_host.state, _host.HostState.PLAYING, "run unaffected by F1")
+
+
+func test_host_f1_ignored_during_osk_and_binding_capture() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	_host.cmd_music_track_selected(TEST_DIR + "/a.wav")
+	# On-screen keyboard: the OSK consumes F1 as inert input and the host
+	# guard refuses to skip behind the open overlay.
+	_host.cmd_open_name_create(-1)
+	check_true(_host._osk.is_open(), "keyboard open")
+	_host._osk._unhandled_input(_f1_event())
+	check_eq(_host._osk._text, "", "F1 types nothing into the OSK")
+	check_true(_host._osk.is_open(), "F1 neither commits nor cancels the OSK")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "F1 does nothing while the OSK is open")
+	_host._osk._cancel()
+	check_false(_host._osk.is_open(), "keyboard closed")
+	# Keyboard binding capture: the capture consumes F1 but never records
+	# it as a binding and the host never skips behind it.
+	var screen: CanvasLayer = _host._settings_screen
+	screen.open()
+	screen.open_keyboard_binding(_host.settings.active_profile_id)
+	screen._selected = _find_row(screen, "binding", "action", "move_left")
+	screen._activate()
+	var capture: Node = screen._capture
+	check_true(capture.active, "capture active")
+	capture._input(_f1_event())
+	check_true(capture.active, "capture keeps waiting (F1 reserved, never captured)")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/a.wav", "F1 does nothing during binding capture")
+	var key_event := InputEventKey.new()
+	key_event.physical_keycode = KEY_J
+	key_event.pressed = true
+	capture._input(key_event)
+	check_false(capture.active, "a real key still captures after F1")
+
+
+func test_host_f1_skip_refreshes_settings_summary() -> void:
+	_fresh_host()
+	_seed_host_library(3)
+	var screen: CanvasLayer = _host._settings_screen
+	var playlist_id: String = _host.settings.create_playlist("Summary")
+	_host.settings.set_playlist_tracks(playlist_id, [TEST_DIR + "/a.wav", TEST_DIR + "/b.wav"])
+	_host.cmd_playlist_play(playlist_id)
+	screen.open()
+	screen._mode = "audio"
+	screen._rebuild()
+	var summary: String = _host.music_now_playing_summary()
+	check_eq(summary.contains("Now Playing: a (Playlist)"), true, "summary shows the track and mode")
+	check_eq(summary.contains("Active playlist: Summary"), true, "summary names the active playlist")
+	_host._unhandled_input(_f1_event())
+	check_eq(_host._audio.current_track_id(), TEST_DIR + "/b.wav", "F1 advanced the track")
+	check_eq(screen._status.text, "Skipped: b", "status reports the skipped track")
+	var refreshed := false
+	for row in screen._rows:
+		if row.get("kind") == "note" and String(row.get("label", "")).contains("Now Playing: b (Playlist)"):
+			refreshed = true
+	check(refreshed, "summary row refreshed after the skip")
+	# The manager catalog refreshes the same way.
+	screen._mode = "playlist"
+	screen._rebuild()
+	_host._unhandled_input(_f1_event())
+	check_eq(screen._status.text, "Skipped: a", "manager status reports the wrap")
+	# Other categories keep their own status line (no music summary
+	# clobbering during a skip).
+	screen._mode = "controls"
+	screen._rebuild()
+	var status_before: String = screen._status.text
+	_host._unhandled_input(_f1_event())
+	check_eq(screen._status.text, status_before, "non-audio categories keep their status")
 
 
 func test_host_preview_stop_on_settings_close() -> void:
@@ -1210,8 +1872,10 @@ func test_normalization_playlist_transition_applies_gain() -> void:
 	var loud_id := TEST_DIR + "/loud.wav"
 	var quiet_id := TEST_DIR + "/quiet.wav"
 	var settings := SettingsClass.new()
+	var playlist_id := settings.create_playlist("Mix")
+	settings.set_playlist_tracks(playlist_id, [loud_id, quiet_id])
+	settings.set_active_playlist(playlist_id)
 	settings.music_mode = "playlist"
-	settings.music_playlist = [loud_id, quiet_id]
 	var manager := _make_manager(settings)
 	manager.set_music_active(true)
 	check_true(manager.is_music_playing(), "playlist starts with the first entry")

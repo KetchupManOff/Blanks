@@ -5,6 +5,12 @@ extends Node
 ## AudioServer or AudioStreamPlayer nodes: the rules cores and menus stay
 ## scene-tree independent and request sounds through the host.
 ##
+## The Playlist mode plays the active named playlist (settings.
+## active_music_playlist_id) and Shuffle draws from either the whole library
+## or that playlist (settings.music_shuffle_source); broken sources repair
+## themselves to Single during selection sanitation. F1 skip advances the
+## current playback through skip_current_track().
+##
 ## Every asset lookup is a safe no-op when the file is missing: startup and
 ## gameplay must never depend on audio assets existing.
 
@@ -14,6 +20,7 @@ const BUILTIN_MUSIC_DIR := "res://audio/music"
 const SFX_DIR := "res://audio/sfx"
 const SUPPORTED_EXTENSIONS := ["ogg", "mp3", "wav"]
 const MUSIC_MODES := SettingsClass.MUSIC_MODES
+const MUSIC_SHUFFLE_SOURCES := SettingsClass.MUSIC_SHUFFLE_SOURCES
 ## Friendly labels for built-in tracks whose filename does not speak for
 ## itself. Keys are plain filenames inside res://audio/music/.
 const BUILTIN_LABELS := {
@@ -113,6 +120,9 @@ var _menu_context: bool = false
 var _menu_track_id: String = ""
 var _playlist: Array = []
 var _playlist_index: int = 0
+## True while Shuffle draws from the active playlist instead of the whole
+## library (mirrors settings.music_shuffle_source at apply time).
+var _shuffle_playlist_source: bool = false
 var _shuffle_order: Array = []
 var _shuffle_index: int = 0
 var _rng := RandomNumberGenerator.new()
@@ -368,9 +378,13 @@ func skipped_files() -> Array:
 
 
 func sanitize_selection(settings) -> bool:
-	## Drops persisted references to tracks that no longer exist, falls the
-	## selected track back to the first valid one, and repairs an empty
-	## playlist from the full library. Returns true when something changed.
+	## Drops persisted references to tracks that no longer exist: the
+	## selected/menu tracks repair as before, and every named playlist
+	## loses its missing/duplicate ids while empty playlists stay valid
+	## editing targets. Ordered playback or a playlist-scoped shuffle with
+	## no usable active playlist falls back to Single (library shuffle
+	## source), so a deleted or emptied active list never causes silence.
+	## Returns true when something changed (the host should re-save).
 	var changed := false
 	if not MUSIC_MODES.has(settings.music_mode):
 		settings.music_mode = "single"
@@ -385,20 +399,52 @@ func sanitize_selection(settings) -> bool:
 	if not settings.menu_music_track.is_empty() and not _library.has(settings.menu_music_track):
 		settings.menu_music_track = ""
 		changed = true
+	for playlist in settings.music_playlists:
+		var cleaned := _clean_track_list(playlist["tracks"])
+		if not _track_lists_equal(cleaned, playlist["tracks"]):
+			playlist["tracks"] = cleaned
+			changed = true
+	# An active pointer at a missing playlist clears; the playback-source
+	# repair below then falls the mode back to Single.
+	if not settings.active_music_playlist_id.is_empty() and settings.find_playlist(settings.active_music_playlist_id).is_empty():
+		settings.active_music_playlist_id = ""
+		changed = true
+	if not MUSIC_SHUFFLE_SOURCES.has(settings.music_shuffle_source):
+		settings.music_shuffle_source = "library"
+		changed = true
+	var ordered_broken: bool = settings.music_mode == "playlist" and settings.active_playlist_tracks().is_empty()
+	var shuffle_broken: bool = (
+		settings.music_mode == "shuffle"
+		and settings.music_shuffle_source == "playlist"
+		and settings.active_playlist_tracks().is_empty()
+	)
+	if ordered_broken or shuffle_broken:
+		settings.music_mode = "single"
+		settings.music_shuffle_source = "library"
+		changed = true
+	return changed
+
+
+func _clean_track_list(tracks: Array) -> Array:
+	# Library-aware structural cleanup of one playlist's tracks: keeps
+	# existing ids in order, dropping duplicates and missing files. Empty
+	# stays empty.
 	var cleaned: Array = []
 	var seen := {}
-	for track_id in settings.music_playlist:
+	for track_id in tracks:
 		if typeof(track_id) == TYPE_STRING and _library.has(track_id) and not seen.has(track_id):
 			cleaned.append(track_id)
 			seen[track_id] = true
-	# A playlist-mode user with an empty playlist gets the full sorted
-	# library as a starting point; other modes keep their selection.
-	if cleaned.is_empty() and settings.music_mode == "playlist" and not _library_order.is_empty():
-		cleaned = _library_order.duplicate()
-	if JSON.stringify(cleaned) != JSON.stringify(settings.music_playlist):
-		settings.music_playlist = cleaned
-		changed = true
-	return changed
+	return cleaned
+
+
+func _track_lists_equal(left: Array, right: Array) -> bool:
+	if left.size() != right.size():
+		return false
+	for i in left.size():
+		if left[i] != right[i]:
+			return false
+	return true
 
 
 # ------------------------------------------------------------------- music
@@ -407,7 +453,10 @@ func apply_music_settings(settings) -> void:
 	_mode = _mode_from_string(settings.music_mode)
 	_selected_id = settings.music_track
 	_menu_track_id = settings.menu_music_track
-	_playlist = settings.music_playlist.duplicate()
+	_playlist = settings.active_playlist_tracks()
+	_shuffle_playlist_source = _mode == MusicMode.SHUFFLE and settings.music_shuffle_source == "playlist"
+	# Keep the current track playing when an edit leaves it in the list;
+	# otherwise start from the first entry.
 	_playlist_index = _playlist.find(_current_played_id)
 	if _playlist_index < 0:
 		_playlist_index = 0
@@ -472,6 +521,72 @@ func is_stream_paused() -> bool:
 
 func current_track_id() -> String:
 	return _current_played_id
+
+
+func playback_mode() -> String:
+	## The applied gameplay music mode as a settings string.
+	match _mode:
+		MusicMode.SINGLE:
+			return "single"
+		MusicMode.PLAYLIST:
+			return "playlist"
+		MusicMode.SHUFFLE:
+			return "shuffle"
+	return "off"
+
+
+func skip_current_track() -> Dictionary:
+	## F1 skip: advances the current playback by one track without
+	## persisting any cursor. The menu override restarts its explicit
+	## track; Single restarts the selected track; ordered playback
+	## advances/wraps; Shuffle progresses its (library- or playlist-scoped)
+	## order. Returns {"ok": bool, "reason": ""} with reasons "preview",
+	## "inactive", "off", or "no_target"; the host maps them to feedback.
+	if _previewing:
+		# A settings preview owns the player; the restore snapshot must
+		# stay valid.
+		return {"ok": false, "reason": "preview"}
+	if not _music_active:
+		return {"ok": false, "reason": "inactive"}
+	if _menu_override_active():
+		_play_track(_menu_track_id)
+		return {"ok": true, "reason": ""}
+	if _library.is_empty():
+		return {"ok": false, "reason": "no_target"}
+	match _mode:
+		MusicMode.OFF:
+			return {"ok": false, "reason": "off"}
+		MusicMode.SINGLE:
+			var target := _current_track_id()
+			if target.is_empty() or not _library.has(target):
+				return {"ok": false, "reason": "no_target"}
+			_play_track(target)
+			return {"ok": true, "reason": ""}
+		MusicMode.PLAYLIST:
+			if _playlist.is_empty():
+				return {"ok": false, "reason": "no_target"}
+			_playlist_index = wrapi(_playlist_index + 1, 0, _playlist.size())
+			_play_track(String(_playlist[_playlist_index]))
+			return {"ok": true, "reason": ""}
+		MusicMode.SHUFFLE:
+			if _shuffle_order.is_empty():
+				return {"ok": false, "reason": "no_target"}
+			_play_track(_next_shuffle())
+			return {"ok": true, "reason": ""}
+	return {"ok": false, "reason": "no_target"}
+
+
+func play_playlist_first_entry() -> void:
+	## Explicit "Play In Order": start the active playlist from its first
+	## entry (seamlessly when it already plays it). Edits keep the current
+	## track via apply_music_settings; only this explicit playback request
+	## rewinds to the top. The menu override keeps precedence: an explicit
+	## menu track never gets preempted by a playlist command.
+	if _mode != MusicMode.PLAYLIST or _playlist.is_empty() or _menu_override_active():
+		return
+	_playlist_index = 0
+	if _current_played_id != String(_playlist[0]):
+		_play_track(String(_playlist[0]))
 
 
 func previewing() -> bool:
@@ -583,10 +698,13 @@ func _play_track(id: String, allow_hold: bool = false) -> void:
 	_pending_hold_id = ""
 	_music_player.stream = _library[id]["stream"]
 	_music_player.volume_db = linear_to_db(_effective_gain(id))
-	# Normal playback resumes audible; a hold resumed while the host is
-	# paused must stay paused. Previews always stay audible.
-	_music_player.stream_paused = _host_paused and not _previewing
 	_music_player.play()
+	# play() (and the stream assignment above) resets stream_paused, so the
+	# pause state re-applies after starting the track: normal playback
+	# resumes audible, a track started while the host is paused stays
+	# paused (a hold resumed mid-pause, or an F1 skip during pause).
+	# Previews always stay audible.
+	_music_player.stream_paused = _host_paused and not _previewing
 
 
 func _stop_music() -> void:
@@ -626,7 +744,7 @@ func _next_shuffle() -> String:
 
 
 func _reshuffle(avoid_id: String = "") -> void:
-	var ids: Array = _library_order.duplicate()
+	var ids := _shuffle_pool()
 	if ids.size() > 1:
 		for i in range(ids.size() - 1, 0, -1):
 			var j: int = _rng.randi_range(0, i)
@@ -641,6 +759,14 @@ func _reshuffle(avoid_id: String = "") -> void:
 			ids[swap_index] = head
 	_shuffle_order = ids
 	_shuffle_index = 0
+
+
+func _shuffle_pool() -> Array:
+	# The shuffle source's ids, copied: the full library, or the active
+	# playlist's tracks while a playlist-scoped shuffle is applied.
+	if _shuffle_playlist_source:
+		return _playlist.duplicate()
+	return _library_order.duplicate()
 
 
 static func _mode_from_string(mode: String) -> int:
